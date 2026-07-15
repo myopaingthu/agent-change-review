@@ -1,0 +1,116 @@
+{
+  "name": "agent-change-review",
+  "displayName": "Agent Change Review",
+  "description": "Review AI agent code changes with accept/reject actions by file or hunk.",
+  "version": "0.2.0",
+  "publisher": "myopaingthu",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other", "SCM Providers"],
+  "keywords": [
+    "ai",
+    "agent",
+    "claude",
+    "codex",
+    "copilot",
+    "diff",
+    "review",
+    "git"
+  ],
+  "pricing": "Free",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/myopaingthu/agent-change-review.git"
+  },
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentChangeReview.open",
+        "title": "Agent Change Review: Open Review Panel"
+      },
+      {
+        "command": "agentChangeReview.refresh",
+        "title": "Agent Change Review: Refresh Changes"
+      },
+      {
+        "command": "agentChangeReview.acceptAll",
+        "title": "Agent Change Review: Accept All Changes"
+      },
+      {
+        "command": "agentChangeReview.rejectAll",
+        "title": "Agent Change Review: Reject All Changes"
+      },
+      {
+        "command": "agentChangeReview.newSession",
+        "title": "Agent Change Review: Start New Review Session"
+      },
+      {
+        "command": "agentChangeReview.installHook",
+        "title": "Agent Change Review: Install Claude Code Hook"
+      },
+      {
+        "command": "agentChangeReview.uninstallHook",
+        "title": "Agent Change Review: Uninstall Claude Code Hook"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "agentChangeReview.refresh",
+        "key": "alt+r",
+        "when": "activeWebviewPanelId == 'agentChangeReview'"
+      },
+      {
+        "command": "agentChangeReview.acceptAll",
+        "key": "alt+a",
+        "when": "activeWebviewPanelId == 'agentChangeReview'"
+      },
+      {
+        "command": "agentChangeReview.rejectAll",
+        "key": "alt+shift+r",
+        "when": "activeWebviewPanelId == 'agentChangeReview'"
+      }
+    ],
+    "configuration": {
+      "title": "Agent Change Review",
+      "properties": {
+        "agentChangeReview.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically refresh changed files when workspace files change."
+        },
+        "agentChangeReview.autoOpen": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically open the review panel when an agent edits files in the workspace."
+        },
+        "agentChangeReview.ignore": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Glob patterns for files to hide from the review, e.g. `**/package-lock.json`, `**/*.lock`, `dist/**`. Supports `*`, `**`, and `?`."
+        },
+        "agentChangeReview.hookScope": {
+          "type": "string",
+          "enum": ["project", "global"],
+          "default": "project",
+          "markdownDescription": "Where **Install Claude Code Hook** writes its config. `project` uses `.claude/settings.local.json` in the current folder; `global` uses `~/.claude/settings.json` for all projects."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.0"
+  }
+}

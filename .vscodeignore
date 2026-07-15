@@ -1,0 +1,10 @@
+.vscode/**
+src/**
+.gitignore
+tsconfig.json
+.vscode-test/**
+out/test/**
+node_modules/**/*.map
+**/*.ts
+*.vsix
+agent_change_review_extension_plan.md
