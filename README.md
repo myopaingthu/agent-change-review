@@ -1,6 +1,6 @@
 # Agent Change Review
 
-Review AI-generated code changes before keeping them. Works with Claude Code, Codex, Copilot, and any coding agent by using your Git working tree as the source of truth.
+Review what a coding agent changed, one request at a time, before keeping it. A Claude Code hook records a Git checkpoint around each request, so the panel shows the agent's work for that request — and only the agent's.
 
 ## What it shows
 
@@ -25,7 +25,7 @@ The repo for each change is derived from the edited **file's path**, so it doesn
 - **Accept All / Reject All** in one click
 - Keyboard-driven review (navigate hunks and accept/reject without the mouse)
 - **Ignore patterns** to hide noise like lock files and build output
-- Rejecting restores the file to how it was *before that request*; single hunks are reverse-applied
+- Rejecting undoes the agent's change and **keeps any edits you made to that file yourself**
 - Refresh on demand, auto-refresh as the agent edits, or auto-open the panel on the first change
 - No dependency on any agent's internal APIs — it only reads Git and a Claude Code hook
 
@@ -50,7 +50,7 @@ The hook is required — without it nothing is recorded and the panel has nothin
 | `Agent Change Review: Open Review Panel` | Open the review panel |
 | `Agent Change Review: Refresh Changes` | Reload the current changes |
 | `Agent Change Review: Accept All Changes` | Mark every changed file as reviewed |
-| `Agent Change Review: Reject All Changes` | Revert every change (tracked files to HEAD, delete new files) |
+| `Agent Change Review: Reject All Changes` | Undo the agent's changes in every file from this request |
 | `Agent Change Review: Reset Review Baseline` | Clear recorded history so your next request is reviewed fresh |
 | `Agent Change Review: Install Claude Code Hook` | Set up the hook so each agent request appears in the panel |
 | `Agent Change Review: Uninstall Claude Code Hook` | Remove the hook configuration |
@@ -92,9 +92,11 @@ The hook records lightweight Git checkpoints as the agent works:
 - **After each edit**, it notes which file (and which repo) the agent touched.
 - **When the agent finishes**, it snapshots each touched repo and records the request.
 
-The panel then shows each repo's baseline versus your **current** working tree,
-limited to the files the agent edited — so you review only the agent's work for
-that one request, and rejected files drop straight out of the list.
+The panel then diffs each repo's **baseline against the agent's result**, limited
+to the files the agent edited. Both ends are fixed checkpoints, so the diff is
+the agent's own work and nothing else — editing one of those files yourself never
+adds your edits to the review. Your working tree is consulted only to drop files
+you've already dealt with.
 
 Because the repo is derived from each edited file's path, a request can span
 several repos and Claude Code can run from anywhere. Checkpoints are stored as
@@ -117,7 +119,8 @@ the hook to run.
 - **One request at a time.** Only the latest request is shown; earlier ones are treated as accepted. Two Claude sessions running at once will show whichever finished last.
 - File **deletes/renames done via shell** (`rm`, `mv`) aren't captured, since the hook watches the `Edit`/`Write` tools.
 - Files matching `.gitignore` aren't tracked (checkpoints use `git add -A`).
-- Hunk rejection can fail if the file changes while you are reviewing; refresh and try again.
+- If you edit the **same lines** the agent did, its change can no longer be undone on its own. Rejecting the file then offers a full restore (which discards your edits to it); rejecting a single hunk just reports the conflict.
+- A file you edit **while the agent is still working** on that same file can't be told apart from the agent's own work, so it will appear in the review.
 
 ## Disclaimer
 

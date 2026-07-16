@@ -64,8 +64,26 @@ export interface AggregatedInteraction {
   parts: InteractionPart[];
 }
 
-/** A changed file, tagged with the repo it belongs to. */
-export type RepoFile = ChangedFile & { repoRoot: string };
+/**
+ * A changed file, tagged with the repo it belongs to.
+ *
+ * `editedSinceAgent` means the file differs from the agent's recorded result:
+ * the user has touched it since. The diff shown is still the agent's own, so
+ * this flags that the review is not a picture of the file's current state.
+ */
+export type RepoFile = ChangedFile & {
+  repoRoot: string;
+  editedSinceAgent: boolean;
+};
+
+/** Which of a file's hunks the user has resolved, and how. Hashes are hunk hashes. */
+export interface FileReview {
+  accepted: string[];
+  rejected: string[];
+}
+
+/** "<repoRoot> <path>" -> that file's resolved hunks, for one interaction. */
+export type ReviewMap = Record<string, FileReview>;
 
 /** Message sent from the webview to the extension. Files are keyed by repo+path. */
 export type InboundMessage =
@@ -117,4 +135,6 @@ export interface RenderFile {
   hunks: RenderHunk[];
   /** True when every hunk (or the whole binary file) has been accepted. */
   reviewed: boolean;
+  /** The user has edited this file since the agent did; the diff is the agent's. */
+  editedSinceAgent: boolean;
 }

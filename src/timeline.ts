@@ -2,9 +2,11 @@ import * as fs from "fs";
 import * as path from "path";
 import { parseDiff } from "./diffParser";
 import {
+  changedPaths,
   diffCommits,
   getGitDir,
   pathExistsInCommit,
+  rejectFilePatch,
   restorePathFromCommit,
   runGit,
   snapshotTree,
@@ -92,9 +94,10 @@ export async function readLatestInteraction(
 /**
  * Every file the interaction changed, across all repos it touched.
  *
- * Diffs each repo's baseline against its *current* working tree rather than the
- * recorded result commit, so the list stays live: rejected files drop out, and
- * later edits to the same files are reflected.
+ * The diff is always between the two recorded checkpoints (base -> result), so
+ * it shows the agent's own edits and nothing else. The working tree is consulted
+ * only to decide which files still need reviewing, never to build diff text —
+ * otherwise the user's later edits to an agent-touched file leak into the review.
  */
 export async function getInteractionDiff(
   interaction: AggregatedInteraction
@@ -105,14 +108,38 @@ export async function getInteractionDiff(
       continue;
     }
     let diff: string;
+    let dirty: Set<string>;
     try {
       const currentTree = await snapshotTree(part.repoRoot);
-      diff = await diffCommits(part.repoRoot, part.baseCommit, currentTree, part.files);
+      // Back at the baseline means the agent's change is gone (rejected, or
+      // undone by hand), so there is nothing left to review for that file.
+      const pending = await changedPaths(
+        part.repoRoot,
+        part.baseCommit,
+        currentTree,
+        part.files
+      );
+      if (!pending.size) {
+        continue;
+      }
+      dirty = await changedPaths(
+        part.repoRoot,
+        part.resultCommit,
+        currentTree,
+        part.files
+      );
+      diff = await diffCommits(part.repoRoot, part.baseCommit, part.resultCommit, [
+        ...pending,
+      ]);
     } catch {
       continue; // Repo may have gone away; show the rest.
     }
     for (const file of parseDiff(diff)) {
-      out.push({ ...file, repoRoot: part.repoRoot });
+      out.push({
+        ...file,
+        repoRoot: part.repoRoot,
+        editedSinceAgent: dirty.has(file.path) || dirty.has(file.oldPath ?? file.path),
+      });
     }
   }
   return out.sort(
@@ -121,10 +148,32 @@ export async function getInteractionDiff(
 }
 
 /**
- * Reject one file within an interaction: revert it to the interaction's base
- * state for its repo, or delete it if the agent created it this request.
+ * Undo the agent's change to one file, leaving any edits the user made to that
+ * same file intact, by reverse-applying just the agent's diff.
+ *
+ * Throws PatchConflictError when the user's edits overlap the agent's own lines,
+ * so the patch no longer applies. Callers should offer hardRestoreInteractionFile
+ * as a confirmed fallback. Binary files have no applicable patch and always
+ * take the restore path.
  */
 export async function rejectInteractionFile(
+  interaction: AggregatedInteraction,
+  repoRoot: string,
+  file: RepoFile
+): Promise<void> {
+  if (file.binary) {
+    await hardRestoreInteractionFile(interaction, repoRoot, file.path);
+    return;
+  }
+  await rejectFilePatch(repoRoot, file);
+}
+
+/**
+ * Restore a file to its state before the agent's request, discarding anything
+ * the user changed in it since. The blunt fallback for when the agent's diff
+ * cannot be reverse-applied on its own.
+ */
+export async function hardRestoreInteractionFile(
   interaction: AggregatedInteraction,
   repoRoot: string,
   filePath: string

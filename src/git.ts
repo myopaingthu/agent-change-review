@@ -12,6 +12,18 @@ export class GitError extends Error {
   }
 }
 
+/**
+ * A patch could not be reverse-applied, because the file no longer contains what
+ * the patch expects — typically the user edited the same lines the agent did.
+ * Distinct from GitError so callers can offer to restore the file instead.
+ */
+export class PatchConflictError extends GitError {
+  constructor(stderr?: string) {
+    super("patch does not apply", stderr);
+    this.name = "PatchConflictError";
+  }
+}
+
 /** Run a git command in `cwd` and return stdout. Rejects with GitError on failure. */
 export function runGit(
   cwd: string,
@@ -94,6 +106,33 @@ export async function diffCommits(
   return runGit(repoRoot, args);
 }
 
+/**
+ * Which of `files` differ between two tree-ish revisions. Used as a yes/no
+ * filter only — never to build diff text — so that live working-tree state can
+ * decide whether a file still needs reviewing without leaking into the review.
+ *
+ * `--no-renames` keeps the reported paths aligned with the caller's file list,
+ * which comes from individual tool calls rather than from git.
+ */
+export async function changedPaths(
+  repoRoot: string,
+  a: string,
+  b: string,
+  files: string[]
+): Promise<Set<string>> {
+  const args = ["diff", "--no-ext-diff", "--name-only", "--no-renames", a, b];
+  if (files.length) {
+    args.push("--", ...files);
+  }
+  const out = await runGit(repoRoot, args);
+  return new Set(
+    out
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+  );
+}
+
 /** Restore a single path in the working tree (and index) to its state in `commit`. */
 export async function restorePathFromCommit(
   repoRoot: string,
@@ -118,21 +157,19 @@ export async function pathExistsInCommit(
 }
 
 /**
- * Reject a single hunk by reverse-applying it to the working tree. Throws a
- * GitError if the patch no longer applies (e.g. the file changed while
- * reviewing).
+ * Undo a patch in the working tree by reverse-applying it. Only the lines the
+ * patch describes are touched, so unrelated edits in the same file survive.
+ * Throws PatchConflictError when the patch no longer applies.
  */
-export async function rejectHunk(
+export async function applyPatchReverse(
   repoRoot: string,
-  file: ChangedFile,
-  hunk: Hunk
+  patchText: string
 ): Promise<void> {
-  const patch = buildHunkPatch(file, hunk);
   const tmp = path.join(
     os.tmpdir(),
-    `acr-hunk-${Date.now()}-${Math.random().toString(16).slice(2)}.patch`
+    `acr-patch-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.patch`
   );
-  await fs.promises.writeFile(tmp, patch, "utf8");
+  await fs.promises.writeFile(tmp, patchText, "utf8");
   try {
     await runGit(repoRoot, [
       "apply",
@@ -141,7 +178,30 @@ export async function rejectHunk(
       "--whitespace=nowarn",
       tmp,
     ]);
+  } catch (err) {
+    throw new PatchConflictError(err instanceof GitError ? err.stderr : undefined);
   } finally {
     await fs.promises.rm(tmp, { force: true });
   }
+}
+
+/** Reject a single hunk by reverse-applying just that hunk to the working tree. */
+export async function rejectHunk(
+  repoRoot: string,
+  file: ChangedFile,
+  hunk: Hunk
+): Promise<void> {
+  await applyPatchReverse(repoRoot, buildHunkPatch(file, hunk));
+}
+
+/** Reject a whole file's change by reverse-applying its complete diff block. */
+export async function rejectFilePatch(
+  repoRoot: string,
+  file: ChangedFile
+): Promise<void> {
+  await applyPatchReverse(repoRoot, ensureTrailingNewline(file.diff));
+}
+
+function ensureTrailingNewline(text: string): string {
+  return text.endsWith("\n") ? text : text + "\n";
 }
