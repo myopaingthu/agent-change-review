@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { ChangedFile, Hunk } from "./types";
-import { buildHunkPatch, parseDiff } from "./diffParser";
+import { buildFilePatch, buildHunkPatch } from "./diffParser";
 
 export class GitError extends Error {
   constructor(message: string, public readonly stderr?: string) {
@@ -194,14 +194,15 @@ export async function rejectHunk(
   await applyPatchReverse(repoRoot, buildHunkPatch(file, hunk));
 }
 
-/** Reject a whole file's change by reverse-applying its complete diff block. */
+/**
+ * Reject a file's change by reverse-applying its hunks. Defaults to all of them;
+ * pass a subset to skip hunks already rejected on their own, which would
+ * otherwise make the whole patch fail to apply.
+ */
 export async function rejectFilePatch(
   repoRoot: string,
-  file: ChangedFile
+  file: ChangedFile,
+  hunks: Hunk[] = file.hunks
 ): Promise<void> {
-  await applyPatchReverse(repoRoot, ensureTrailingNewline(file.diff));
-}
-
-function ensureTrailingNewline(text: string): string {
-  return text.endsWith("\n") ? text : text + "\n";
+  await applyPatchReverse(repoRoot, buildFilePatch(file, hunks));
 }

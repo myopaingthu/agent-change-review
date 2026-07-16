@@ -11,7 +11,13 @@ import {
   runGit,
   snapshotTree,
 } from "./git";
-import { AggregatedInteraction, InteractionPart, InteractionRecord, RepoFile } from "./types";
+import {
+  AggregatedInteraction,
+  Hunk,
+  InteractionPart,
+  InteractionRecord,
+  RepoFile,
+} from "./types";
 
 const CHECKPOINT_REF = "refs/acr/head";
 
@@ -151,21 +157,24 @@ export async function getInteractionDiff(
  * Undo the agent's change to one file, leaving any edits the user made to that
  * same file intact, by reverse-applying just the agent's diff.
  *
- * Throws PatchConflictError when the user's edits overlap the agent's own lines,
- * so the patch no longer applies. Callers should offer hardRestoreInteractionFile
- * as a confirmed fallback. Binary files have no applicable patch and always
- * take the restore path.
+ * `hunks` defaults to the file's whole change; pass the still-pending subset so
+ * hunks the user already rejected are not attempted twice. Throws
+ * PatchConflictError when the user's edits overlap the agent's own lines, so the
+ * patch no longer applies — callers should offer hardRestoreInteractionFile as a
+ * confirmed fallback. Binary files have no applicable patch and always take the
+ * restore path.
  */
 export async function rejectInteractionFile(
   interaction: AggregatedInteraction,
   repoRoot: string,
-  file: RepoFile
+  file: RepoFile,
+  hunks: Hunk[] = file.hunks
 ): Promise<void> {
-  if (file.binary) {
+  if (file.binary || !hunks.length) {
     await hardRestoreInteractionFile(interaction, repoRoot, file.path);
     return;
   }
-  await rejectFilePatch(repoRoot, file);
+  await rejectFilePatch(repoRoot, file, hunks);
 }
 
 /**

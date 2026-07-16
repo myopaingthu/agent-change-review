@@ -20,7 +20,7 @@ The repo for each change is derived from the edited **file's path**, so it doesn
 
 - Review only what the **agent** changed, one request at a time — never your own edits
 - Handles a request that spans **several repos** at once, grouped by repo
-- See the unified diff for each file, split into individual hunks
+- See the unified diff for each file, split into one hunk per contiguous run of changed lines — so unrelated edits are reviewed independently rather than as a block
 - **Accept / Reject** a whole file or an individual hunk
 - **Accept All / Reject All** in one click
 - Keyboard-driven review (navigate hunks and accept/reject without the mouse)

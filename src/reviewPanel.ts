@@ -14,6 +14,7 @@ import {
   markFileRejected,
   markHunkAccepted,
   markHunkRejected,
+  pendingHunks,
 } from "./reviewModel";
 import {
   clearTimeline,
@@ -278,7 +279,12 @@ export class ReviewPanel {
     const failures: string[] = [];
     for (const file of this.files) {
       try {
-        await rejectInteractionFile(interaction, file.repoRoot, file);
+        await rejectInteractionFile(
+          interaction,
+          file.repoRoot,
+          file,
+          pendingHunks(file, review)
+        );
         markFileRejected(review, file);
       } catch (err) {
         // Leave conflicted files listed and unmarked, so they can still be dealt with.
@@ -357,7 +363,8 @@ export class ReviewPanel {
     }
 
     try {
-      await rejectInteractionFile(interaction, repoRoot, file);
+      const pending = pendingHunks(file, this.getReviewMap(interaction.id));
+      await rejectInteractionFile(interaction, repoRoot, file, pending);
       await this.recordFileRejected(interaction.id, file);
       vscode.window.showInformationMessage(`Undid the agent's changes to "${file.path}".`);
     } catch (err) {

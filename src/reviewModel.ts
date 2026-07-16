@@ -127,6 +127,19 @@ export function buildRenderModel(
   return { render, pruned };
 }
 
+/**
+ * The hunks of a file still awaiting a decision — everything the user has not
+ * already rejected. Rejecting a file must reverse-apply only these, since an
+ * already-rejected hunk is gone from disk and would fail to apply again.
+ */
+export function pendingHunks(file: RepoFile, review: ReviewMap): Hunk[] {
+  const stored = reviewFor(review, fileKey(file.repoRoot, file.path));
+  if (!stored.rejected.length) {
+    return file.hunks;
+  }
+  return file.hunks.filter((h) => !stored.rejected.includes(hashHunk(h)));
+}
+
 /** Mark every hunk of a file accepted (or the file itself, when it has no hunks). */
 export function markFileAccepted(review: ReviewMap, file: RepoFile): void {
   const key = fileKey(file.repoRoot, file.path);

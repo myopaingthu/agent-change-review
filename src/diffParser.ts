@@ -92,7 +92,7 @@ function parseFileBlock(blockLines: string[]): ChangedFile | null {
     oldPath: oldPath && oldPath !== path ? oldPath : undefined,
     status,
     diff,
-    hunks: parseHunks(blockLines),
+    hunks: splitHunks(parseHunks(blockLines)),
     binary,
     untracked: false,
   };
@@ -135,6 +135,133 @@ export function parseHunks(blockLines: string[]): Hunk[] {
   return hunks;
 }
 
+/** Lines of context kept around each run, matching git's own `--unified=3`. */
+const CONTEXT_LINES = 3;
+
+type LineKind = "context" | "change" | "noNewline";
+
+function kindOf(line: string): LineKind {
+  if (line.startsWith("+") || line.startsWith("-")) {
+    return "change";
+  }
+  if (line.startsWith("\\")) {
+    return "noNewline";
+  }
+  return "context";
+}
+
+/**
+ * Re-cut hunks so each contiguous run of changed lines becomes its own hunk.
+ *
+ * `git diff -U3` emits one hunk whenever changes are within 6 lines of each
+ * other, so unrelated edits arrive welded together and can only be accepted or
+ * rejected as a group. Splitting per run makes each edit independently
+ * reviewable, which is what the diff actually describes.
+ */
+export function splitHunks(hunks: Hunk[], context = CONTEXT_LINES): Hunk[] {
+  const out: Hunk[] = [];
+  for (const hunk of hunks) {
+    out.push(...splitHunk(hunk, context));
+  }
+  return out;
+}
+
+function splitHunk(hunk: Hunk, context: number): Hunk[] {
+  const body = hunk.lines.slice(1); // drop the @@ header
+  const runs = findRuns(body);
+  if (runs.length <= 1) {
+    // Nothing to separate; keep git's own hunk, section heading and all.
+    return [hunk];
+  }
+
+  // Old/new line number that each body line sits at.
+  const oldAt: number[] = [];
+  const newAt: number[] = [];
+  let oldLine = hunk.oldStart;
+  let newLine = hunk.newStart;
+  for (const line of body) {
+    oldAt.push(oldLine);
+    newAt.push(newLine);
+    const kind = kindOf(line);
+    if (kind === "context") {
+      oldLine++;
+      newLine++;
+    } else if (kind === "change") {
+      if (line.startsWith("-")) {
+        oldLine++;
+      } else {
+        newLine++;
+      }
+    }
+  }
+
+  // Partition the body rather than giving every run its own context window: two
+  // runs less than 2*context apart would otherwise claim the same lines, and git
+  // refuses a patch whose hunks overlap. Each gap is divided instead, so the
+  // hunks still concatenate back into exactly this hunk.
+  const bounds: Array<[number, number]> = [];
+  for (let i = 0; i < runs.length; i++) {
+    const from = i === 0 ? 0 : bounds[i - 1][1];
+    const gap = i === runs.length - 1 ? 0 : runs[i + 1][0] - runs[i][1];
+    const to =
+      i === runs.length - 1 ? body.length : runs[i][1] + Math.min(context, gap);
+    bounds.push([from, to]);
+  }
+
+  return bounds.map(([from, to]) => {
+    const slice = body.slice(from, to);
+
+    let oldLines = 0;
+    let newLines = 0;
+    for (const line of slice) {
+      if (line.startsWith("-")) {
+        oldLines++;
+      } else if (line.startsWith("+")) {
+        newLines++;
+      } else if (kindOf(line) === "context") {
+        oldLines++;
+        newLines++;
+      }
+    }
+
+    // git points a zero-length side at the line *before* the change.
+    const oldStart = oldLines === 0 ? Math.max(0, oldAt[from] - 1) : oldAt[from];
+    const newStart = newLines === 0 ? Math.max(0, newAt[from] - 1) : newAt[from];
+    // No section heading: git's belongs to the parent hunk's start, and would be
+    // wrong for the later runs rather than merely absent.
+    const header = `@@ -${oldStart},${oldLines} +${newStart},${newLines} @@`;
+
+    return {
+      header,
+      lines: [header, ...slice],
+      oldStart,
+      oldLines,
+      newStart,
+      newLines,
+    };
+  });
+}
+
+/** Maximal runs of changed lines, as [start, end) into the hunk body. */
+function findRuns(body: string[]): Array<[number, number]> {
+  const runs: Array<[number, number]> = [];
+  let i = 0;
+  while (i < body.length) {
+    if (kindOf(body[i]) !== "change") {
+      i++;
+      continue;
+    }
+    const start = i;
+    // A "\ No newline" marker describes the line before it, so it travels with
+    // the run rather than ending it.
+    while (i < body.length && kindOf(body[i]) !== "context") {
+      i++;
+    }
+    runs.push([start, i]);
+  }
+  return runs;
+}
+
 /** The file-block header lines (everything before the first hunk header). */
 export function fileHeaderText(diff: string): string {
   const out: string[] = [];
@@ -148,13 +275,19 @@ export function fileHeaderText(diff: string): string {
 }
 
 /**
- * Build a standalone unified-diff patch containing a single hunk, suitable for
- * `git apply --reverse`.
+ * Build a standalone unified-diff patch carrying just the given hunks of a file,
+ * suitable for `git apply --reverse`. Passing a subset is how already-rejected
+ * hunks are left out, so the rest still applies.
  */
-export function buildHunkPatch(file: ChangedFile, hunk: Hunk): string {
+export function buildFilePatch(file: ChangedFile, hunks: Hunk[]): string {
   const header = fileHeaderText(file.diff);
-  const body = hunk.lines.join("\n");
+  const body = hunks.map((h) => h.lines.join("\n")).join("\n");
   return `${header}\n${body}\n`;
+}
+
+/** Build a standalone patch containing a single hunk. */
+export function buildHunkPatch(file: ChangedFile, hunk: Hunk): string {
+  return buildFilePatch(file, [hunk]);
 }
 
 function stripPrefix(p: string): string {
