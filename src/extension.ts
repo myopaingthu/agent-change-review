@@ -1,6 +1,9 @@
+import * as fs from "fs";
 import * as vscode from "vscode";
 import { installHook, syncHookRunner, uninstallHook } from "./hookInstall";
-import { countReviewableChanges, ReviewPanel } from "./reviewPanel";
+import { discoverRepos, invalidateRepoCache } from "./repoResolver";
+import { hasPendingReview, ReviewPanel } from "./reviewPanel";
+import { getTimelinePath } from "./timeline";
 
 export function activate(context: vscode.ExtensionContext): void {
   const ensurePanel = () => ReviewPanel.current ?? ReviewPanel.createOrShow(context);
@@ -13,6 +16,7 @@ export function activate(context: vscode.ExtensionContext): void {
       ReviewPanel.createOrShow(context);
     }),
     vscode.commands.registerCommand("agentChangeReview.refresh", () => {
+      invalidateRepoCache();
       void ensurePanel().refresh();
     }),
     vscode.commands.registerCommand("agentChangeReview.acceptAll", () => {
@@ -32,7 +36,7 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  // Lets external tools (e.g. a Claude Code hook) open/refresh the panel via
+  // Lets external tools open/refresh the panel via
   //   code --open-url "vscode://<publisher>.agent-change-review/open"
   context.subscriptions.push(
     vscode.window.registerUriHandler({
@@ -46,33 +50,38 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      invalidateRepoCache();
+      void syncAutoOpenWatchers(context);
+      void ReviewPanel.current?.refresh();
+    }),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("agentChangeReview.autoOpen")) {
+        void syncAutoOpenWatchers(context);
+      }
+    })
+  );
+
   registerAutoRefresh(context);
+  void syncAutoOpenWatchers(context);
 }
 
+/**
+ * Refresh an open panel as files change: the review diffs each checkpoint
+ * against the current working tree, so edits and rejects are reflected live.
+ */
 function registerAutoRefresh(context: vscode.ExtensionContext): void {
   const watcher = vscode.workspace.createFileSystemWatcher("**/*");
   const isNoise = (uri: vscode.Uri) =>
     /(^|[/\\])(\.git|node_modules|out|dist|\.vscode-test)([/\\]|$)/.test(uri.fsPath);
 
   const debounced = debounce((uri: vscode.Uri) => {
-    if (isNoise(uri)) {
+    if (isNoise(uri) || !ReviewPanel.current) {
       return;
     }
-    const config = vscode.workspace.getConfiguration("agentChangeReview");
-
-    if (ReviewPanel.current) {
-      if (config.get<boolean>("autoRefresh", true)) {
-        void ReviewPanel.current.refresh();
-      }
-      return;
-    }
-
-    if (config.get<boolean>("autoOpen", false)) {
-      void countReviewableChanges().then((n) => {
-        if (n > 0 && !ReviewPanel.current) {
-          ReviewPanel.createOrShow(context);
-        }
-      });
+    if (vscode.workspace.getConfiguration("agentChangeReview").get("autoRefresh", true)) {
+      void ReviewPanel.current.refresh();
     }
   }, 500);
 
@@ -80,6 +89,59 @@ function registerAutoRefresh(context: vscode.ExtensionContext): void {
   watcher.onDidCreate(debounced, null, context.subscriptions);
   watcher.onDidDelete(debounced, null, context.subscriptions);
   context.subscriptions.push(watcher);
+}
+
+/**
+ * Open the panel when the agent records a new request. Watches each repo's
+ * timeline directly with fs.watchFile, because the timeline lives inside `.git`,
+ * which VS Code's file watcher excludes.
+ */
+const autoOpenWatchers = new Map<string, () => void>();
+
+async function syncAutoOpenWatchers(context: vscode.ExtensionContext): Promise<void> {
+  const enabled = vscode.workspace
+    .getConfiguration("agentChangeReview")
+    .get<boolean>("autoOpen", false);
+
+  const wanted = new Set<string>();
+  if (enabled) {
+    try {
+      for (const repo of await discoverRepos()) {
+        try {
+          wanted.add(await getTimelinePath(repo));
+        } catch {
+          // Repo went away; skip it.
+        }
+      }
+    } catch {
+      // Discovery failed; leave watchers as they are.
+    }
+  }
+
+  for (const [timelinePath, listener] of autoOpenWatchers) {
+    if (!wanted.has(timelinePath)) {
+      fs.unwatchFile(timelinePath, listener);
+      autoOpenWatchers.delete(timelinePath);
+    }
+  }
+
+  for (const timelinePath of wanted) {
+    if (autoOpenWatchers.has(timelinePath)) {
+      continue;
+    }
+    const listener = () => {
+      if (ReviewPanel.current) {
+        return;
+      }
+      void hasPendingReview().then((pending) => {
+        if (pending && !ReviewPanel.current) {
+          ReviewPanel.createOrShow(context);
+        }
+      });
+    };
+    fs.watchFile(timelinePath, { interval: 1000 }, listener);
+    autoOpenWatchers.set(timelinePath, listener);
+  }
 }
 
 function debounce<T extends (arg: vscode.Uri) => void>(fn: T, ms: number): T {
@@ -93,5 +155,8 @@ function debounce<T extends (arg: vscode.Uri) => void>(fn: T, ms: number): T {
 }
 
 export function deactivate(): void {
-  // Nothing to clean up; disposables are tracked via context.subscriptions.
+  for (const [timelinePath, listener] of autoOpenWatchers) {
+    fs.unwatchFile(timelinePath, listener);
+  }
+  autoOpenWatchers.clear();
 }

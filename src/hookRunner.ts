@@ -1,19 +1,26 @@
 /**
  * Standalone Claude Code hook runner. Invoked outside the VS Code extension host
- * as `node hook.js <prompt|tool|stop>`, with the hook event JSON on stdin.
+ * as `node hook.js <prompt|pre|tool|stop>`, with the hook event JSON on stdin.
  *
- * It records one checkpoint of the working tree per interaction boundary so the
- * extension can show exactly what the agent changed in its latest request:
- *   - prompt (UserPromptSubmit): snapshot the "before" state, capture the prompt.
- *   - tool   (PostToolUse):      record which file the agent edited.
- *   - stop   (Stop):             snapshot the "after" state, append the interaction.
+ * Records one checkpoint per repo per interaction so the extension can show what
+ * the agent changed in its latest request:
+ *   - prompt (UserPromptSubmit): start an interaction, capture the prompt.
+ *   - pre    (PreToolUse):       first time a repo is touched, snapshot it *before* the edit.
+ *   - tool   (PostToolUse):      record which file (and repo) the agent edited.
+ *   - stop   (Stop):             snapshot each touched repo, append one record per repo.
  *
- * Snapshots are git commit objects kept reachable by refs/acr/head so `git gc`
- * cannot prune them. This file must not import `vscode` — it runs in plain Node.
+ * The repo is derived from each edited file's path, never from Claude's cwd —
+ * cwd may not be a repo at all (e.g. a workspace folder holding backend/ and
+ * frontend/), and a single request can span several repos.
+ *
+ * Snapshots are git commits kept reachable by refs/acr/head so `git gc` cannot
+ * prune them. This file must not import anything but Node built-ins: it is
+ * copied on its own to ~/.claude/acr/hook.js.
  */
 import { execFileSync } from "child_process";
 import * as crypto from "crypto";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 
 interface HookInput {
@@ -24,10 +31,13 @@ interface HookInput {
   tool_input?: { file_path?: string };
 }
 
-interface PendingInteraction {
-  id: string;
-  prompt: string;
-  baseCommit: string;
+interface BaseEntry {
+  repo: string;
+  base: string;
+}
+interface FileEntry {
+  repo: string;
+  file: string;
 }
 
 const CHECKPOINT_REF = "refs/acr/head";
@@ -35,99 +45,158 @@ const CHECKPOINT_REF = "refs/acr/head";
 function main(): void {
   const event = process.argv[2];
   const input = readInput();
-  const cwd = input.cwd || process.cwd();
-
-  const repoRoot = tryGit(cwd, ["rev-parse", "--show-toplevel"]);
-  if (!repoRoot) {
-    return; // Not a git repo; nothing to record.
-  }
-
-  const gitDir = tryGit(repoRoot, ["rev-parse", "--absolute-git-dir"]);
-  if (!gitDir) {
-    return;
-  }
-  const acrDir = path.join(gitDir, "acr");
-  fs.mkdirSync(acrDir, { recursive: true });
-
-  const pendingPath = path.join(acrDir, "pending.json");
-  const pendingFilesPath = path.join(acrDir, "pending-files");
-  const timelinePath = path.join(acrDir, "timeline.jsonl");
+  const sessionId = sanitize(input.session_id || "default");
+  const dir = path.join(os.homedir(), ".claude", "acr", "pending", sessionId);
+  const metaPath = path.join(dir, "meta.json");
+  const basesPath = path.join(dir, "bases.jsonl");
+  const filesPath = path.join(dir, "files.jsonl");
 
   if (event === "prompt") {
-    const baseCommit = snapshot(repoRoot, acrDir);
-    if (!baseCommit) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      metaPath,
+      JSON.stringify({
+        id: input.prompt_id || `${sessionId}-${Date.now()}`,
+        prompt: (input.prompt || "").trim(),
+      })
+    );
+    return;
+  }
+
+  if (event === "pre") {
+    if (!fs.existsSync(metaPath)) {
       return;
     }
-    const pending: PendingInteraction = {
-      id: input.prompt_id || `${input.session_id || "acr"}-${Date.now()}`,
-      prompt: (input.prompt || "").trim(),
-      baseCommit,
-    };
-    fs.writeFileSync(pendingPath, JSON.stringify(pending));
-    fs.rmSync(pendingFilesPath, { force: true });
+    const repo = repoOf(input.tool_input?.file_path);
+    if (!repo) {
+      return;
+    }
+    // Keep the first base per repo: it predates every edit this interaction made
+    // to that repo.
+    if (readJsonl<BaseEntry>(basesPath).some((b) => b.repo === repo)) {
+      return;
+    }
+    const base = snapshot(repo);
+    if (base) {
+      appendJsonl(basesPath, { repo, base });
+    }
     return;
   }
 
   if (event === "tool") {
-    const fp = input.tool_input?.file_path;
-    if (!fp || !fs.existsSync(pendingPath)) {
+    if (!fs.existsSync(metaPath)) {
       return;
     }
-    const rel = toRepoRelative(repoRoot, fp);
+    const filePath = input.tool_input?.file_path;
+    const repo = repoOf(filePath);
+    if (!repo || !filePath) {
+      return;
+    }
+    const rel = toRepoRelative(repo, filePath);
     if (rel) {
-      // Append (not rewrite) so parallel tool calls don't clobber each other.
-      fs.appendFileSync(pendingFilesPath, rel + "\n");
+      // Append rather than rewrite so parallel tool calls can't clobber.
+      appendJsonl(filesPath, { repo, file: rel });
     }
     return;
   }
 
   if (event === "stop") {
-    if (!fs.existsSync(pendingPath)) {
+    if (!fs.existsSync(metaPath)) {
       return;
     }
-    let pending: PendingInteraction;
+    let meta: { id: string; prompt: string };
     try {
-      pending = JSON.parse(fs.readFileSync(pendingPath, "utf8"));
+      meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
     } catch {
-      fs.rmSync(pendingPath, { force: true });
+      fs.rmSync(dir, { recursive: true, force: true });
       return;
     }
 
-    const files = readPendingFiles(pendingFilesPath);
-    fs.rmSync(pendingPath, { force: true });
-    fs.rmSync(pendingFilesPath, { force: true });
-
-    if (files.length === 0) {
-      return; // No file edits this turn; nothing to review.
+    const bases = readJsonl<BaseEntry>(basesPath);
+    const filesByRepo = new Map<string, Set<string>>();
+    for (const entry of readJsonl<FileEntry>(filesPath)) {
+      let set = filesByRepo.get(entry.repo);
+      if (!set) {
+        set = new Set();
+        filesByRepo.set(entry.repo, set);
+      }
+      set.add(entry.file);
     }
 
-    const resultCommit = snapshot(repoRoot, acrDir);
-    if (!resultCommit) {
-      return;
+    // One timestamp for the whole interaction so its per-repo records group.
+    const ts = Date.now();
+    for (const [repo, fileSet] of filesByRepo) {
+      const baseEntry = bases.find((b) => b.repo === repo);
+      if (!baseEntry) {
+        continue; // No pre-edit baseline for this repo; can't diff it safely.
+      }
+      const resultCommit = snapshot(repo);
+      if (!resultCommit) {
+        continue;
+      }
+      const acr = acrDir(repo);
+      if (!acr) {
+        continue;
+      }
+      const record = {
+        id: meta.id,
+        prompt: meta.prompt,
+        baseCommit: baseEntry.base,
+        resultCommit,
+        files: [...fileSet],
+        ts,
+      };
+      fs.appendFileSync(
+        path.join(acr, "timeline.jsonl"),
+        JSON.stringify(record) + "\n"
+      );
     }
 
-    const record = {
-      id: pending.id,
-      prompt: pending.prompt,
-      baseCommit: pending.baseCommit,
-      resultCommit,
-      files,
-      ts: Date.now(),
-    };
-    fs.appendFileSync(timelinePath, JSON.stringify(record) + "\n");
+    fs.rmSync(dir, { recursive: true, force: true });
     return;
   }
 }
 
 /**
- * Capture the full working tree as a checkpoint commit and advance refs/acr/head.
- * Uses a throwaway index so the user's real index and working tree are untouched.
- * Returns the commit SHA, or "" on failure.
+ * The repo containing `filePath`, or null. Resolves from the file's nearest
+ * existing directory, so files the agent is about to create still resolve.
  */
-function snapshot(repoRoot: string, acrDir: string): string {
+function repoOf(filePath?: string): string | null {
+  if (!filePath) {
+    return null;
+  }
+  let dir = path.dirname(path.resolve(filePath));
+  while (!fs.existsSync(dir)) {
+    const parent = path.dirname(dir);
+    if (parent === dir) {
+      return null;
+    }
+    dir = parent;
+  }
+  const root = tryGit(dir, ["rev-parse", "--show-toplevel"]);
+  return root ? realpathSafe(root) : null;
+}
+
+function acrDir(repoRoot: string): string | null {
+  const gitDir = tryGit(repoRoot, ["rev-parse", "--absolute-git-dir"]);
+  if (!gitDir) {
+    return null;
+  }
+  const dir = path.join(gitDir, "acr");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
+ * Capture a repo's full working tree as a checkpoint commit and advance
+ * refs/acr/head. Uses a throwaway index so the real index and working tree are
+ * untouched. Returns the commit SHA, or "" on failure.
+ */
+function snapshot(repoRoot: string): string {
   const tmpIndex = path.join(
-    acrDir,
-    `index.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`
+    os.tmpdir(),
+    `acr-index-${process.pid}-${crypto.randomBytes(4).toString("hex")}`
   );
   const env = { ...process.env, GIT_INDEX_FILE: tmpIndex };
   try {
@@ -146,7 +215,7 @@ function snapshot(repoRoot: string, acrDir: string): string {
       commitArgs.push("-p", parent);
     }
     commitArgs.push("-m", "acr checkpoint");
-    // Provide an identity so commit-tree works even without a configured user.
+    // Provide an identity so commit-tree works without a configured git user.
     const identityEnv = {
       ...process.env,
       GIT_AUTHOR_NAME: "Agent Change Review",
@@ -167,32 +236,46 @@ function snapshot(repoRoot: string, acrDir: string): string {
   }
 }
 
-function readPendingFiles(pendingFilesPath: string): string[] {
-  if (!fs.existsSync(pendingFilesPath)) {
-    return [];
-  }
-  const seen = new Set<string>();
-  for (const line of fs.readFileSync(pendingFilesPath, "utf8").split("\n")) {
-    const rel = line.trim();
-    if (rel) {
-      seen.add(rel);
-    }
-  }
-  return [...seen];
-}
-
 function toRepoRelative(repoRoot: string, filePath: string): string | null {
   // Resolve symlinks on both sides (e.g. macOS /tmp -> /private/tmp) so paths
   // from the hook input line up with git's realpath'd repo root.
-  const absRoot = realpathSafe(repoRoot);
-  const abs = realpathSafe(
-    path.isAbsolute(filePath) ? filePath : path.join(repoRoot, filePath)
-  );
-  const rel = path.relative(absRoot, abs);
+  const abs = realpathSafe(path.resolve(filePath));
+  const rel = path.relative(repoRoot, abs);
   if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
-    return null; // Outside the repo.
+    return null;
   }
   return rel.split(path.sep).join("/");
+}
+
+function readJsonl<T>(filePath: string): T[] {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(filePath, "utf8");
+  } catch {
+    return [];
+  }
+  const out: T[] = [];
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    try {
+      out.push(JSON.parse(trimmed) as T);
+    } catch {
+      // Skip a torn line rather than dropping the interaction.
+    }
+  }
+  return out;
+}
+
+function appendJsonl(filePath: string, value: unknown): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.appendFileSync(filePath, JSON.stringify(value) + "\n");
+}
+
+function sanitize(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]/g, "_");
 }
 
 /** realpath that tolerates a not-yet/deleted file by resolving its directory. */

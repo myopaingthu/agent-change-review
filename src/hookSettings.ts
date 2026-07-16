@@ -16,9 +16,13 @@ export interface HookSettings {
   [key: string]: unknown;
 }
 
+const EDIT_TOOLS = "Edit|Write|MultiEdit|NotebookEdit";
+
 export const EVENT_ARGS: Array<{ event: string; arg: string; matcher?: string }> = [
   { event: "UserPromptSubmit", arg: "prompt" },
-  { event: "PostToolUse", arg: "tool", matcher: "Edit|Write|MultiEdit|NotebookEdit" },
+  // PreToolUse captures each repo's baseline *before* the agent edits it.
+  { event: "PreToolUse", arg: "pre", matcher: EDIT_TOOLS },
+  { event: "PostToolUse", arg: "tool", matcher: EDIT_TOOLS },
   { event: "Stop", arg: "stop" },
 ];
 

@@ -13,12 +13,16 @@ export class GitError extends Error {
 }
 
 /** Run a git command in `cwd` and return stdout. Rejects with GitError on failure. */
-export function runGit(cwd: string, args: string[]): Promise<string> {
+export function runGit(
+  cwd: string,
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env
+): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       "git",
       args,
-      { cwd, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
+      { cwd, maxBuffer: 64 * 1024 * 1024, windowsHide: true, env },
       (error, stdout, stderr) => {
         if (error) {
           reject(new GitError(`git ${args.join(" ")} failed`, stderr || error.message));
@@ -49,6 +53,28 @@ export async function getGitDir(repoRoot: string): Promise<string> {
 /** Initialize a new git repository in `cwd`. Required before any review works. */
 export async function gitInit(cwd: string): Promise<void> {
   await runGit(cwd, ["init"]);
+}
+
+/**
+ * Write the current working tree to a tree object and return its SHA, without
+ * touching the real index. Diffing a checkpoint against this (rather than the
+ * recorded result commit) keeps the review live: rejected files drop out, and
+ * files the agent created still show, since `add -A` stages untracked files.
+ */
+export async function snapshotTree(repoRoot: string): Promise<string> {
+  const tmpIndex = path.join(
+    os.tmpdir(),
+    `acr-view-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
+  const env = { ...process.env, GIT_INDEX_FILE: tmpIndex };
+  try {
+    // Seed from HEAD when it exists so deletions register; harmless if not.
+    await runGit(repoRoot, ["read-tree", "HEAD"], env).catch(() => undefined);
+    await runGit(repoRoot, ["add", "-A"], env);
+    return (await runGit(repoRoot, ["write-tree"], env)).trim();
+  } finally {
+    await fs.promises.rm(tmpIndex, { force: true });
+  }
 }
 
 /**
@@ -88,134 +114,6 @@ export async function pathExistsInCommit(
     return true;
   } catch {
     return false;
-  }
-}
-
-async function hasHead(repoRoot: string): Promise<boolean> {
-  try {
-    await runGit(repoRoot, ["rev-parse", "--verify", "HEAD"]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Return all changed files in the working tree relative to HEAD, plus untracked
- * files. Combines staged and unstaged changes so agent edits are always shown.
- */
-export async function getChangedFiles(repoRoot: string): Promise<ChangedFile[]> {
-  const head = await hasHead(repoRoot);
-  const diffArgs = ["--no-ext-diff", "--unified=3", "-M"];
-  const trackedDiff = head
-    ? await runGit(repoRoot, ["diff", "HEAD", ...diffArgs])
-    : await runGit(repoRoot, ["diff", "--cached", ...diffArgs]);
-
-  const tracked = parseDiff(trackedDiff);
-  const seen = new Set(tracked.map((f) => f.path));
-
-  const untracked = await getUntrackedFiles(repoRoot);
-  const untrackedFiles: ChangedFile[] = [];
-  for (const rel of untracked) {
-    if (seen.has(rel)) {
-      continue;
-    }
-    untrackedFiles.push(await buildUntrackedFile(repoRoot, rel));
-  }
-
-  return [...tracked, ...untrackedFiles].sort((a, b) => a.path.localeCompare(b.path));
-}
-
-async function getUntrackedFiles(repoRoot: string): Promise<string[]> {
-  const out = await runGit(repoRoot, [
-    "ls-files",
-    "--others",
-    "--exclude-standard",
-  ]);
-  return out.split("\n").map((l) => l.trim()).filter(Boolean);
-}
-
-async function buildUntrackedFile(repoRoot: string, rel: string): Promise<ChangedFile> {
-  const abs = path.join(repoRoot, rel);
-  let content = "";
-  let binary = false;
-  try {
-    const buf = await fs.promises.readFile(abs);
-    binary = buf.includes(0);
-    if (!binary) {
-      content = buf.toString("utf8");
-    }
-  } catch {
-    // File may have been removed between listing and reading.
-  }
-
-  let diff = `diff --git a/${rel} b/${rel}\nnew file mode 100644\n--- /dev/null\n+++ b/${rel}\n`;
-  const hunks: ChangedFile["hunks"] = [];
-
-  if (binary) {
-    diff += "Binary files /dev/null and b/" + rel + " differ\n";
-  } else if (content.length) {
-    const lines = content.split("\n");
-    // A trailing newline produces a final empty element; drop it for counting.
-    const hasTrailingNewline = content.endsWith("\n");
-    const bodyLines = hasTrailingNewline ? lines.slice(0, -1) : lines;
-    const count = bodyLines.length;
-    const header = `@@ -0,0 +1,${count} @@`;
-    const hunkLines = [header, ...bodyLines.map((l) => `+${l}`)];
-    if (!hasTrailingNewline) {
-      hunkLines.push("\\ No newline at end of file");
-    }
-    diff += hunkLines.join("\n") + "\n";
-    hunks.push({
-      header,
-      lines: hunkLines,
-      oldStart: 0,
-      oldLines: 0,
-      newStart: 1,
-      newLines: count,
-    });
-  }
-
-  return {
-    path: rel,
-    status: "untracked",
-    diff,
-    hunks,
-    binary,
-    untracked: true,
-  };
-}
-
-/**
- * Reject a file: revert it to its HEAD state (for tracked files) or delete it
- * (for new/untracked files).
- */
-export async function rejectFile(repoRoot: string, file: ChangedFile): Promise<void> {
-  const abs = path.join(repoRoot, file.path);
-
-  if (file.untracked) {
-    await fs.promises.rm(abs, { force: true });
-    return;
-  }
-
-  switch (file.status) {
-    case "added":
-      // Staged new file: unstage then remove from disk.
-      await runGit(repoRoot, ["restore", "--staged", "--", file.path]).catch(() => undefined);
-      await fs.promises.rm(abs, { force: true });
-      break;
-    case "renamed":
-      // Restore the original path from HEAD and drop the renamed copy.
-      if (file.oldPath) {
-        await runGit(repoRoot, ["checkout", "HEAD", "--", file.oldPath]);
-      }
-      await runGit(repoRoot, ["restore", "--staged", "--", file.path]).catch(() => undefined);
-      await fs.promises.rm(abs, { force: true });
-      break;
-    default:
-      // modified or deleted: restore index and working tree from HEAD.
-      await runGit(repoRoot, ["checkout", "HEAD", "--", file.path]);
-      break;
   }
 }
 

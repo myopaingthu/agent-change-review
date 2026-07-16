@@ -2,26 +2,30 @@
 
 Review AI-generated code changes before keeping them. Works with Claude Code, Codex, Copilot, and any coding agent by using your Git working tree as the source of truth.
 
-With the optional Claude Code hook, it becomes a **Cursor-style, per-request review**: each thing you ask the agent to do is reviewed on its own, showing only what the agent changed — not your manual edits.
+## What it shows
 
-## Two ways to review
+**Only the agent's latest request — nothing else.** After you run **Install Claude Code Hook** once, the panel shows exactly what the agent changed in its most recent request, under a `You asked: "…"` banner. It is *not* a list of your uncommitted changes:
 
-**Per-interaction (timeline) mode** — recommended for Claude Code. After you run **Install Claude Code Hook** once, the panel shows exactly what the agent changed *in its latest request*, with a `You asked: "…"` banner. Each new request folds the previous one into the baseline, so:
+- **Your own hand-edits never appear.** Only files the agent actually edited are shown.
+- **Work that cancels out still shows.** Ask the agent to *add* a comment, then to *remove* it: the net diff against your last commit is zero, but the panel shows the removal as the current step, because the previous request has been folded into the baseline.
+- **Anything you commit, stage, or edit yourself is irrelevant** to what's displayed.
 
-- Your own hand-edits don't clutter the review — only the files the agent touched show up.
-- Work that cancels out still shows. Ask the agent to *add* a comment, then to *remove* it: instead of showing nothing (the changes net to zero against your last commit), the panel shows the removal as the current step.
+## Multi-repo workspaces
 
-**Working-tree mode** — the fallback when no hook has recorded anything yet, or for agents other than Claude Code. Shows every change in your Git working tree versus the last commit (`HEAD`).
+A workspace can hold several repos — a folder containing `backend/` and `frontend/`, or a multi-root workspace. Both are supported, including a **single request that edits several repos at once**: the panel merges them into one review, grouped by repo name.
+
+The repo for each change is derived from the edited **file's path**, so it doesn't matter where Claude Code is running from — the workspace root doesn't even need to be a repo itself. Repo discovery reuses VS Code's own detection (the same repos you see in Source Control), plus a shallow filesystem scan as a backup.
 
 ## Features
 
-- Review only what the **agent** changed, one request at a time (timeline mode)
+- Review only what the **agent** changed, one request at a time — never your own edits
+- Handles a request that spans **several repos** at once, grouped by repo
 - See the unified diff for each file, split into individual hunks
 - **Accept / Reject** a whole file or an individual hunk
 - **Accept All / Reject All** in one click
 - Keyboard-driven review (navigate hunks and accept/reject without the mouse)
 - **Ignore patterns** to hide noise like lock files and build output
-- Rejecting restores the file to how it was *before that request* (timeline mode) or to `HEAD` (working-tree mode); single hunks are reverse-applied
+- Rejecting restores the file to how it was *before that request*; single hunks are reverse-applied
 - Refresh on demand, auto-refresh as the agent edits, or auto-open the panel on the first change
 - No dependency on any agent's internal APIs — it only reads Git and a Claude Code hook
 
@@ -37,7 +41,7 @@ With the optional Claude Code hook, it becomes a **Cursor-style, per-request rev
 3. Let your agent work. After each request, the panel shows exactly what it changed.
 4. Review each file/hunk and click **Accept** or **Reject**.
 
-Without the hook, the panel still works in working-tree mode: it shows all changes versus your last commit.
+The hook is required — without it nothing is recorded and the panel has nothing to show. It is the only thing that knows which changes came from the agent.
 
 ## Commands
 
@@ -47,7 +51,7 @@ Without the hook, the panel still works in working-tree mode: it shows all chang
 | `Agent Change Review: Refresh Changes` | Reload the current changes |
 | `Agent Change Review: Accept All Changes` | Mark every changed file as reviewed |
 | `Agent Change Review: Reject All Changes` | Revert every change (tracked files to HEAD, delete new files) |
-| `Agent Change Review: Start New Review Session` | Reset the baseline; clears the recorded timeline so your next request is reviewed fresh |
+| `Agent Change Review: Reset Review Baseline` | Clear recorded history so your next request is reviewed fresh |
 | `Agent Change Review: Install Claude Code Hook` | Set up the hook so each agent request appears in the panel |
 | `Agent Change Review: Uninstall Claude Code Hook` | Remove the hook configuration |
 
@@ -68,8 +72,8 @@ When the review panel is focused:
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `agentChangeReview.autoRefresh` | `true` | Refresh changed files automatically when workspace files change |
-| `agentChangeReview.autoOpen` | `false` | Open the review panel automatically when an agent first edits files |
+| `agentChangeReview.autoRefresh` | `true` | Re-render the review automatically as files change |
+| `agentChangeReview.autoOpen` | `false` | Open the review panel automatically when the agent records a new request |
 | `agentChangeReview.ignore` | `[]` | Glob patterns to hide from the review, e.g. `["**/package-lock.json", "**/*.lock", "dist/**"]` |
 | `agentChangeReview.hookScope` | `project` | Where **Install Claude Code Hook** writes: `project` (`.claude/settings.local.json`) or `global` (`~/.claude/settings.json`) |
 
@@ -81,33 +85,38 @@ is captured as its own review step.
 
 ### How it works
 
-The hook records a lightweight Git checkpoint of your working tree at each
-request boundary:
+The hook records lightweight Git checkpoints as the agent works:
 
-- **When you submit a prompt**, it snapshots the "before" state and remembers what you asked.
-- **After each file edit**, it notes which file the agent touched.
-- **When the agent finishes**, it snapshots the "after" state and records the interaction.
+- **When you submit a prompt**, it starts an interaction and remembers what you asked.
+- **Just before the agent's first edit to a repo**, it snapshots that repo — the "before" baseline.
+- **After each edit**, it notes which file (and which repo) the agent touched.
+- **When the agent finishes**, it snapshots each touched repo and records the request.
 
-The panel then shows `after` vs `before`, limited to the files the agent edited —
-so you review only the agent's work for that one request. Checkpoints are stored
-as unreferenced Git objects under `refs/acr/head` and a log in
-`.git/acr/timeline.jsonl`; they never touch your commits, index, or `git status`.
+The panel then shows each repo's baseline versus your **current** working tree,
+limited to the files the agent edited — so you review only the agent's work for
+that one request, and rejected files drop straight out of the list.
 
-**New Session** clears this timeline and starts a fresh baseline.
+Because the repo is derived from each edited file's path, a request can span
+several repos and Claude Code can run from anywhere. Checkpoints are stored as
+Git objects kept alive by `refs/acr/head`, with a log in `.git/acr/timeline.jsonl`
+— they never touch your commits, index, or `git status`.
+
+**New Session** clears these timelines and starts a fresh baseline.
 
 ### What the hook installs
 
-It writes a small runner to `~/.claude/acr/hook.js` and adds three entries
-(`UserPromptSubmit`, `PostToolUse` for `Edit|Write|MultiEdit|NotebookEdit`, and
-`Stop`) to your Claude Code settings. Use **Uninstall Claude Code Hook** to remove
-them. Node.js must be on your `PATH` for the hook to run.
+It writes a small runner to `~/.claude/acr/hook.js` and adds four entries
+(`UserPromptSubmit`, `PreToolUse` and `PostToolUse` for
+`Edit|Write|MultiEdit|NotebookEdit`, and `Stop`) to your Claude Code settings. Use
+**Uninstall Claude Code Hook** to remove them. Node.js must be on your `PATH` for
+the hook to run.
 
 ## Limitations
 
-- **Claude Code only** for per-interaction mode. Other agents fall back to working-tree mode.
-- File **deletes/renames done via shell** (`rm`, `mv`) aren't captured as agent edits, since the hook watches `Edit`/`Write` tools. They still show in working-tree mode.
-- In working-tree mode, untracked files are shown as full additions; hunk-level reject isn't supported for them — use **Reject file** to delete the file.
-- Rejecting a file discards that file's changes for the request (timeline mode) or any uncommitted changes to it (working-tree mode).
+- **Claude Code only.** The hook is what identifies agent changes; other agents record nothing, so the panel stays empty.
+- **One request at a time.** Only the latest request is shown; earlier ones are treated as accepted. Two Claude sessions running at once will show whichever finished last.
+- File **deletes/renames done via shell** (`rm`, `mv`) aren't captured, since the hook watches the `Edit`/`Write` tools.
+- Files matching `.gitignore` aren't tracked (checkpoints use `git add -A`).
 - Hunk rejection can fail if the file changes while you are reviewing; refresh and try again.
 
 ## Disclaimer

@@ -2,7 +2,7 @@
   "name": "agent-change-review",
   "displayName": "Agent Change Review",
   "description": "Review AI agent code changes with accept/reject actions by file or hunk.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "myopaingthu",
   "license": "MIT",
   "engines": {
@@ -47,7 +47,7 @@
       },
       {
         "command": "agentChangeReview.newSession",
-        "title": "Agent Change Review: Start New Review Session"
+        "title": "Agent Change Review: Reset Review Baseline"
       },
       {
         "command": "agentChangeReview.installHook",
