@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { parseDiff } from "./diffParser";
+import { applySectionHeadings, parseDiff } from "./diffParser";
 import {
   changedPaths,
   diffCommits,
@@ -115,32 +115,54 @@ export async function getInteractionDiff(
     }
     let diff: string;
     let dirty: Set<string>;
+    let pending: string[];
     try {
       const currentTree = await snapshotTree(part.repoRoot);
       // Back at the baseline means the agent's change is gone (rejected, or
       // undone by hand), so there is nothing left to review for that file.
-      const pending = await changedPaths(
+      const changed = await changedPaths(
         part.repoRoot,
         part.baseCommit,
         currentTree,
         part.files
       );
-      if (!pending.size) {
+      if (!changed.size) {
         continue;
       }
+      pending = [...changed];
       dirty = await changedPaths(
         part.repoRoot,
         part.resultCommit,
         currentTree,
         part.files
       );
-      diff = await diffCommits(part.repoRoot, part.baseCommit, part.resultCommit, [
-        ...pending,
-      ]);
+      diff = await diffCommits(
+        part.repoRoot,
+        part.baseCommit,
+        part.resultCommit,
+        pending
+      );
     } catch {
       continue; // Repo may have gone away; show the rest.
     }
-    for (const file of parseDiff(diff)) {
+
+    const parsed = parseDiff(diff);
+    try {
+      // The same diff at -U0 is one hunk per run, carrying git's own header
+      // labels; borrow them for the hunks split out of the -U3 diff.
+      const labelled = await diffCommits(
+        part.repoRoot,
+        part.baseCommit,
+        part.resultCommit,
+        pending,
+        0
+      );
+      applySectionHeadings(parsed, parseDiff(labelled));
+    } catch {
+      // Labels are cosmetic; a bare header beats losing the diff.
+    }
+
+    for (const file of parsed) {
       out.push({
         ...file,
         repoRoot: part.repoRoot,

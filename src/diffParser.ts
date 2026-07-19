@@ -262,6 +262,51 @@ function findRuns(body: string[]): Array<[number, number]> {
   return runs;
 }
 
+const HUNK_SECTION = /^(@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@)(?: (.*))?$/;
+
+/** The "public function foo()" trailing part of a hunk header, if git set one. */
+function sectionOf(header: string): string {
+  const m = header.match(HUNK_SECTION);
+  return m && m[2] ? m[2].trim() : "";
+}
+
+/**
+ * Label re-cut hunks with the enclosing declaration git itself would name.
+ *
+ * Splitting a hunk invalidates git's own label, which describes the *parent*
+ * hunk's start. Recomputing it here is not an option: which lines count as a
+ * declaration depends on the userdiff driver `.gitattributes` selects (Laravel
+ * sets `*.php diff=php`, so indented declarations match where git's default
+ * would not), and those patterns are compiled into git per language.
+ *
+ * So let git label them. `labelled` comes from the same diff at `--unified=0`,
+ * which emits exactly one hunk per run of changed lines — the same cuts made
+ * here — each carrying git's own label for that run's position.
+ */
+export function applySectionHeadings(
+  files: ChangedFile[],
+  labelled: ChangedFile[]
+): void {
+  const byPath = new Map(labelled.map((f) => [f.path, f]));
+  for (const file of files) {
+    const source = byPath.get(file.path);
+    // Both sides are one-hunk-per-run, so they line up. If they ever don't,
+    // leave the headers bare rather than mislabelling them.
+    if (!source || source.hunks.length !== file.hunks.length) {
+      continue;
+    }
+    file.hunks.forEach((hunk, i) => {
+      const section = sectionOf(source.hunks[i].header);
+      if (!section || sectionOf(hunk.header)) {
+        return; // Nothing to add, or git's own label is still accurate.
+      }
+      const header = `${hunk.header} ${section}`;
+      hunk.header = header;
+      hunk.lines[0] = header;
+    });
+  }
+}
+
 /** The file-block header lines (everything before the first hunk header). */
 export function fileHeaderText(diff: string): string {
   const out: string[] = [];

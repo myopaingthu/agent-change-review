@@ -97,9 +97,10 @@ export async function diffCommits(
   repoRoot: string,
   base: string,
   result: string,
-  files: string[]
+  files: string[],
+  context = 3
 ): Promise<string> {
-  const args = ["diff", "--no-ext-diff", "--unified=3", "-M", base, result];
+  const args = ["diff", "--no-ext-diff", `--unified=${context}`, "-M", base, result];
   if (files.length) {
     args.push("--", ...files);
   }
