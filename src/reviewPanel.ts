@@ -165,10 +165,10 @@ export class ReviewPanel {
     }
 
     if (!this.files.length) {
-      const asked = this.interaction.prompt ? ` ("${clip(this.interaction.prompt)}")` : "";
       this.post({
         type: "empty",
-        reason: `Nothing left to review from your last request${asked}. Waiting for the next one…`,
+        reason:
+          "Nothing left to review from your last request. Waiting for the next one…",
       });
       return;
     }
@@ -903,12 +903,6 @@ export class ReviewPanel {
 </body>
 </html>`;
   }
-}
-
-/** Truncate long prompt text for compact display. */
-function clip(text: string, max = 80): string {
-  const t = text.trim().replace(/\s+/g, " ");
-  return t.length > max ? t.slice(0, max - 1) + "…" : t;
 }
 
 function getNonce(): string {

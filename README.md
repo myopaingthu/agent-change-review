@@ -87,7 +87,7 @@ is captured as its own review step.
 
 The hook records lightweight Git checkpoints as the agent works:
 
-- **When you submit a prompt**, it starts an interaction and remembers what you asked.
+- **When you submit a prompt**, it starts an interaction.
 - **Just before the agent's first edit to a repo**, it snapshots that repo — the "before" baseline.
 - **After each edit**, it notes which file (and which repo) the agent touched.
 - **When the agent finishes**, it snapshots each touched repo and records the request.
