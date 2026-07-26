@@ -25,7 +25,11 @@
     "type": "git",
     "url": "https://github.com/myopaingthu/agent-change-review.git"
   },
-  "activationEvents": [],
+  "bugs": {
+    "url": "https://github.com/myopaingthu/agent-change-review/issues"
+  },
+  "homepage": "https://github.com/myopaingthu/agent-change-review#readme",
+  "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [

@@ -7,4 +7,7 @@ out/test/**
 node_modules/**/*.map
 **/*.ts
 *.vsix
+media/*.svg
+TESTING.md
+PUBLISHING.md
 agent_change_review_extension_plan.md
