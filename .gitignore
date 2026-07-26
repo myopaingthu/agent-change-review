@@ -144,3 +144,6 @@ vite.config.ts.timestamp-*
 
 # VS Code extension package artifact
 *.vsix
+
+# Claude Code local hook config (written by "Install Claude Code Hook")
+.claude/settings.local.json

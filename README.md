@@ -4,7 +4,7 @@ Review what a coding agent changed, one request at a time, before keeping it. A 
 
 ## What it shows
 
-**Only the agent's latest request — nothing else.** After you run **Install Claude Code Hook** once, the panel shows exactly what the agent changed in its most recent request, under a `You asked: "…"` banner. It is *not* a list of your uncommitted changes:
+**Only the agent's latest request — nothing else.** After you run **Install Claude Code Hook** once, the panel shows exactly what the agent changed in its most recent request. It is *not* a list of your uncommitted changes:
 
 - **Your own hand-edits never appear.** Only files the agent actually edited are shown.
 - **Work that cancels out still shows.** Ask the agent to *add* a comment, then to *remove* it: the net diff against your last commit is zero, but the panel shows the removal as the current step, because the previous request has been folded into the baseline.

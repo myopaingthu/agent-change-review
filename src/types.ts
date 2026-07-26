@@ -104,8 +104,6 @@ export type OutboundMessage =
   | {
       type: "render";
       files: RenderFile[];
-      /** The request text, shown in the banner. */
-      prompt: string;
       interactionTs: number;
       /** True when the request touched more than one repo. */
       multiRepo: boolean;

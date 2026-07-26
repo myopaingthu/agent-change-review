@@ -176,7 +176,6 @@ export class ReviewPanel {
     this.post({
       type: "render",
       files: await this.buildRenderFiles(this.interaction),
-      prompt: this.interaction.prompt,
       interactionTs: this.interaction.ts,
       multiRepo: new Set(this.files.map((f) => f.repoRoot)).size > 1,
     });
@@ -635,17 +634,6 @@ export class ReviewPanel {
     background: var(--vscode-button-secondaryBackground);
   }
   button.secondary:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
-  .banner {
-    padding: 8px 16px;
-    background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
-    border-bottom: 1px solid var(--vscode-panel-border);
-    font-size: 12px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .banner .ask { color: var(--vscode-descriptionForeground); }
-  .banner .prompt { font-weight: 600; }
   #content { padding: 12px 16px 40px; }
   .file { border: 1px solid var(--vscode-panel-border); border-radius: 6px; margin-bottom: 14px; overflow: hidden; }
   .file.reviewed { opacity: 0.55; }
@@ -729,14 +717,12 @@ export class ReviewPanel {
     <button id="rejectAll" title="Reject all (Alt+Shift+R)">Reject All</button>
     <button id="refresh" class="secondary" title="Refresh (Alt+R)">Refresh</button>
   </header>
-  <div id="banner" class="banner" style="display:none"></div>
   <div id="content"><div class="empty">Loading…</div></div>
   <footer id="hint">j/k or ↑/↓ select hunk &nbsp;·&nbsp; a accept &nbsp;·&nbsp; r reject &nbsp;·&nbsp; shift+a/r whole file</footer>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const content = document.getElementById('content');
     const countEl = document.getElementById('count');
-    const banner = document.getElementById('banner');
 
     document.getElementById('refresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
     document.getElementById('newSession').addEventListener('click', () => vscode.postMessage({ type: 'newSession' }));
@@ -748,13 +734,6 @@ export class ReviewPanel {
       if (className) e.className = className;
       if (text !== undefined) e.textContent = text;
       return e;
-    }
-
-    function showBanner(prompt) {
-      banner.innerHTML = '';
-      banner.appendChild(el('span', 'ask', 'You asked: '));
-      banner.appendChild(el('span', 'prompt', prompt && prompt.length ? '“' + prompt + '”' : '(your latest request)'));
-      banner.style.display = 'block';
     }
 
     function classifyLine(raw) {
@@ -886,7 +865,6 @@ export class ReviewPanel {
       content.innerHTML = '';
       if (msg.type === 'render') {
         countEl.textContent = '(' + msg.files.length + ')';
-        showBanner(msg.prompt);
         if (msg.multiRepo) {
           let current = null;
           for (const file of msg.files) {
@@ -901,7 +879,6 @@ export class ReviewPanel {
         }
         rebuildSelection();
       } else if (msg.type === 'empty') {
-        banner.style.display = 'none';
         countEl.textContent = '';
         const box = el('div', 'empty');
         box.appendChild(el('div', '', msg.reason));
@@ -915,7 +892,6 @@ export class ReviewPanel {
         content.appendChild(box);
         rebuildSelection();
       } else if (msg.type === 'error') {
-        banner.style.display = 'none';
         countEl.textContent = '';
         content.appendChild(el('div', 'error', msg.message));
         rebuildSelection();

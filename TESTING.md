@@ -64,7 +64,7 @@ list of files.
 
 ### 7.1 The add-then-remove test (the key scenario)
 - [ ] Ask Claude Code: *"add a `// hello` comment at the top of backend/app.js"*.
-      → panel shows a `You asked: "…"` banner and the **addition**.
+      → panel shows the **addition**.
 - [ ] Ask: *"remove that comment"*.
       → panel shows the **removal** (`- // hello`), **not** an empty view, even
       though `git diff HEAD` in that repo is now empty.

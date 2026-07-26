@@ -11,6 +11,7 @@ Breaking rework of how changes are detected. **Re-run "Install Claude Code Hook"
 - **One hunk per contiguous run of changed lines.** `git diff` welds changes into a single hunk whenever they're within 6 lines of each other, so unrelated edits could only be accepted or rejected as a group. Each run is now its own hunk, as in Cursor: two adjacent changed lines stay together, two separated ones are separate hunks.
 - **Only the agent's own edits are ever shown.** The diff is taken between the two recorded checkpoints, so editing a file the agent touched no longer adds your edits to the review. Such a file is badged `edited by you`, since the diff shown is the agent's, not the file's current state.
 - **Rejecting undoes only the agent's change and keeps your own edits**, by reverse-applying the agent's diff rather than restoring the whole file. If your edits overlap the agent's exact lines the change can't be undone on its own, and you're asked before falling back to a full restore.
+- **The `You asked: "…"` prompt banner is gone.** The panel leads with the changes themselves. The hook still records the request text, so nothing about detection changes.
 - Auto-open now triggers off recorded requests rather than raw file activity.
 
 ## 0.2.1
