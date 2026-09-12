@@ -2,42 +2,28 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
-import { applyOurGroups, HookSettings, removeOurGroups } from "./hookSettings";
+import {
+  applyOurGroups,
+  hasOurGroups,
+  HookSettings,
+  matchesOurGroups,
+  removeOurGroups,
+} from "./hookSettings";
 
 type HookScope = "project" | "global";
 
-/** Absolute path to the synced hook runner used by Claude Code's hook commands. */
-export function getGlobalHookPath(): string {
+/** Where installs before 0.4 copied the spawned hook runner. */
+function legacyRunnerPath(): string {
   return path.join(os.homedir(), ".claude", "acr", "hook.js");
 }
 
-/**
- * Copy the extension's compiled hook runner to a stable global path so the hook
- * command in settings survives extension updates (which change the install dir).
- */
-export function syncHookRunner(context: vscode.ExtensionContext): void {
-  const source = path.join(context.extensionPath, "out", "hookRunner.js");
-  const dest = getGlobalHookPath();
-  try {
-    if (!fs.existsSync(source)) {
-      return;
-    }
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.copyFileSync(source, dest);
-  } catch {
-    // Best effort; installHook surfaces a clear error if the runner is missing.
-  }
-}
-
-export async function installHook(context: vscode.ExtensionContext): Promise<void> {
-  const source = path.join(context.extensionPath, "out", "hookRunner.js");
-  if (!fs.existsSync(source)) {
+export async function installHook(baseUrl: string | undefined): Promise<void> {
+  if (!baseUrl) {
     vscode.window.showErrorMessage(
-      "Agent Change Review: hook runner not found. Compile the extension first (npm run compile)."
+      "Agent Change Review: the hook receiver could not start, so there is no address to register. Reload the window and try again."
     );
     return;
   }
-  syncHookRunner(context);
 
   const scope = getScope();
   const settingsPath = resolveSettingsPath(scope);
@@ -58,9 +44,8 @@ export async function installHook(context: vscode.ExtensionContext): Promise<voi
     return;
   }
 
-  const hookPath = getGlobalHookPath();
   settings.hooks = settings.hooks ?? {};
-  applyOurGroups(settings.hooks, hookPath);
+  applyOurGroups(settings.hooks, baseUrl);
 
   try {
     writeSettings(settingsPath, settings);
@@ -70,6 +55,8 @@ export async function installHook(context: vscode.ExtensionContext): Promise<voi
     );
     return;
   }
+
+  removeLegacyRunner();
 
   const choice = await vscode.window.showInformationMessage(
     `Claude Code hook installed (${scope}). Restart your Claude Code session so it picks up the hook, then your next request will appear in the review panel.`,
@@ -80,41 +67,103 @@ export async function installHook(context: vscode.ExtensionContext): Promise<voi
   }
 }
 
-export async function uninstallHook(): Promise<void> {
-  const scope = getScope();
-  const settingsPath = resolveSettingsPath(scope);
-  if (!settingsPath || !fs.existsSync(settingsPath)) {
-    vscode.window.showInformationMessage("Agent Change Review: no hook to remove.");
+/**
+ * Keep an existing install pointing at this window's receiver.
+ *
+ * Runs on activation and rewrites our entries in place when they are stale —
+ * either the legacy `node` command form from before 0.4, or a URL whose port
+ * moved because the fixed one was taken. Files without our entries are left
+ * alone, so this never installs the hook behind the user's back.
+ */
+export function syncHookConfig(baseUrl: string | undefined): void {
+  if (!baseUrl) {
     return;
   }
+  let migrated = false;
 
-  let settings: HookSettings;
-  try {
-    settings = readSettings(settingsPath);
-  } catch {
-    vscode.window.showErrorMessage(
-      `Agent Change Review: could not parse ${settingsPath}.`
-    );
-    return;
-  }
-
-  const hookPath = getGlobalHookPath();
-  if (settings.hooks) {
-    removeOurGroups(settings.hooks, hookPath);
-    if (Object.keys(settings.hooks).length === 0) {
-      delete settings.hooks;
+  for (const settingsPath of candidateSettingsPaths()) {
+    let settings: HookSettings;
+    try {
+      settings = readSettings(settingsPath);
+    } catch {
+      continue; // Malformed file; installHook reports it properly.
+    }
+    if (!hasOurGroups(settings.hooks) || matchesOurGroups(settings.hooks, baseUrl)) {
+      continue;
+    }
+    settings.hooks = settings.hooks ?? {};
+    applyOurGroups(settings.hooks, baseUrl);
+    try {
+      writeSettings(settingsPath, settings);
+      migrated = true;
+    } catch {
+      // Read-only or unwritable; leave it to an explicit reinstall.
     }
   }
 
-  try {
-    writeSettings(settingsPath, settings);
-  } catch (err) {
-    vscode.window.showErrorMessage(
-      `Agent Change Review: could not write ${settingsPath}: ${String(err)}`
+  if (migrated) {
+    removeLegacyRunner();
+    vscode.window.showInformationMessage(
+      "Agent Change Review: updated the Claude Code hook — it no longer needs Node.js installed. Restart your Claude Code session to pick it up."
     );
-    return;
   }
-  vscode.window.showInformationMessage("Agent Change Review: Claude Code hook removed.");
+}
+
+export async function uninstallHook(): Promise<void> {
+  let removed = false;
+
+  for (const settingsPath of candidateSettingsPaths()) {
+    let settings: HookSettings;
+    try {
+      settings = readSettings(settingsPath);
+    } catch {
+      vscode.window.showErrorMessage(
+        `Agent Change Review: could not parse ${settingsPath}.`
+      );
+      continue;
+    }
+    if (!hasOurGroups(settings.hooks)) {
+      continue;
+    }
+    removeOurGroups(settings.hooks!);
+    if (Object.keys(settings.hooks!).length === 0) {
+      delete settings.hooks;
+    }
+    try {
+      writeSettings(settingsPath, settings);
+      removed = true;
+    } catch (err) {
+      vscode.window.showErrorMessage(
+        `Agent Change Review: could not write ${settingsPath}: ${String(err)}`
+      );
+    }
+  }
+
+  removeLegacyRunner();
+  vscode.window.showInformationMessage(
+    removed
+      ? "Agent Change Review: Claude Code hook removed."
+      : "Agent Change Review: no hook to remove."
+  );
+}
+
+/** Both files an install could live in, so a scope change can't strand entries. */
+function candidateSettingsPaths(): string[] {
+  const paths: string[] = [];
+  const project = resolveSettingsPath("project");
+  if (project) {
+    paths.push(project);
+  }
+  paths.push(resolveSettingsPath("global")!);
+  return paths.filter((p) => fs.existsSync(p));
+}
+
+function removeLegacyRunner(): void {
+  try {
+    fs.rmSync(legacyRunnerPath(), { force: true });
+  } catch {
+    // Best effort; an orphaned copy is harmless once nothing references it.
+  }
 }
 
 function getScope(): HookScope {

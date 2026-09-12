@@ -33,6 +33,9 @@ The repo for each change is derived from the edited **file's path**, so it doesn
 
 - A Git repository — the extension uses Git to snapshot, diff, and revert changes. If the folder isn't a repo yet, the panel offers a one-click **Initialize Git Repository**.
 - VS Code 1.90 or newer
+- A Claude Code version with HTTP hooks (January 2026 or later)
+- **No Node.js install required.** Claude Code talks to the extension directly, so nothing has to be on your `PATH`.
+- VS Code must be **running** while the agent works — that's what records the changes.
 
 ## Usage
 
@@ -107,19 +110,24 @@ Git objects kept alive by `refs/acr/head`, with a log in `.git/acr/timeline.json
 
 ### What the hook installs
 
-It writes a small runner to `~/.claude/acr/hook.js` and adds four entries
-(`UserPromptSubmit`, `PreToolUse` and `PostToolUse` for
+It adds four entries (`UserPromptSubmit`, `PreToolUse` and `PostToolUse` for
 `Edit|Write|MultiEdit|NotebookEdit`, and `Stop`) to your Claude Code settings. Use
-**Uninstall Claude Code Hook** to remove them. Node.js must be on your `PATH` for
-the hook to run.
+**Uninstall Claude Code Hook** to remove them.
+
+They are `http` hooks: Claude Code posts each event straight to the extension,
+which listens on `127.0.0.1` only, so nothing is spawned and no interpreter has
+to be installed. The address carries a random per-machine token, the listener
+accepts only local `POST`s that carry it, and one port is shared by every VS Code
+window. Nothing is reachable from your network.
 
 ## Limitations
 
 - **Claude Code only.** The hook is what identifies agent changes; other agents record nothing, so the panel stays empty.
+- **VS Code has to be open while the agent works.** The extension itself records the changes, so a request made with the editor closed isn't captured and can't be reviewed later.
 - **One request at a time.** Only the latest request is shown; earlier ones are treated as accepted. Two Claude sessions running at once will show whichever finished last.
 - File **deletes/renames done via shell** (`rm`, `mv`) aren't captured, since the hook watches the `Edit`/`Write` tools.
 - Files matching `.gitignore` aren't tracked (checkpoints use `git add -A`).
-- If you edit the **same lines** the agent did, its change can no longer be undone on its own. Rejecting the file then offers a full restore (which discards your edits to it); rejecting a single hunk just reports the conflict.
+- If you edit the **same lines** the agent did, its change can no longer be undone on its own. Rejecting the file then offers a full restore (which discards your edits to it); rejecting a single hunk just reports the conflict. Editing *near* the agent's change is fine — only a genuine overlap conflicts.
 - A file you edit **while the agent is still working** on that same file can't be told apart from the agent's own work, so it will appear in the review.
 
 ## Disclaimer

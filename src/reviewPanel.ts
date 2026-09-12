@@ -3,7 +3,6 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { GitError, PatchConflictError, gitInit, rejectHunk } from "./git";
-import { installHook } from "./hookInstall";
 import { compileIgnore } from "./ignore";
 import { discoverRepos, invalidateRepoCache } from "./repoResolver";
 import {
@@ -74,6 +73,8 @@ export class ReviewPanel {
   private repos: string[] = [];
   /** timeline.jsonl path -> its fs.watchFile listener, one per repo. */
   private timelineWatchers = new Map<string, () => void>();
+  private refreshing: Promise<void> | undefined;
+  private refreshPending = false;
 
   public static createOrShow(context: vscode.ExtensionContext): ReviewPanel {
     const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
@@ -110,7 +111,47 @@ export class ReviewPanel {
     void this.refresh();
   }
 
-  public async refresh(): Promise<void> {
+  /**
+   * Reload from git. Coalesced: a refresh requested while one is running folds
+   * into a single follow-up rather than queueing another full pass, because
+   * rejecting writes to the working tree and immediately trips the file watcher.
+   */
+  public refresh(): Promise<void> {
+    if (this.refreshing) {
+      this.refreshPending = true;
+      return this.refreshing;
+    }
+    this.refreshing = this.doRefresh().finally(() => {
+      this.refreshing = undefined;
+      if (this.refreshPending) {
+        this.refreshPending = false;
+        void this.refresh();
+      }
+    });
+    return this.refreshing;
+  }
+
+  /**
+   * Re-post the current diff with updated review marks, without touching git.
+   *
+   * Accepting resolves a hunk in the review map alone — nothing on disk moves —
+   * so re-running the whole diff would spend a working-tree snapshot and four
+   * git diffs to arrive at the files already in hand.
+   */
+  private async rerender(): Promise<void> {
+    if (!this.interaction || !this.files.length) {
+      await this.refresh();
+      return;
+    }
+    this.post({
+      type: "render",
+      files: await this.buildRenderFiles(this.interaction),
+      interactionTs: this.interaction.ts,
+      multiRepo: new Set(this.files.map((f) => f.repoRoot)).size > 1,
+    });
+  }
+
+  private async doRefresh(): Promise<void> {
     if (!vscode.workspace.workspaceFolders?.length) {
       this.post({ type: "empty", reason: "Open a folder to review agent changes." });
       return;
@@ -148,7 +189,8 @@ export class ReviewPanel {
       this.post({
         type: "empty",
         reason:
-          "No agent changes recorded yet. Make a request in Claude Code and it will show up here.",
+          "No agent changes recorded yet. Make a request in Claude Code and it will show up here. " +
+          "If nothing appears after one, check that your Claude Code supports HTTP hooks (January 2026 or later).",
         action: "installHook",
       });
       return;
@@ -228,7 +270,8 @@ export class ReviewPanel {
         await this.initGit();
         break;
       case "installHook":
-        await installHook(this.context);
+        // Via the command so the panel doesn't need the receiver's address.
+        await vscode.commands.executeCommand("agentChangeReview.installHook");
         break;
     }
   }
@@ -255,7 +298,7 @@ export class ReviewPanel {
       markFileAccepted(review, file);
     }
     await this.setReviewMap(this.interaction.id, review);
-    await this.refresh();
+    await this.rerender();
   }
 
   public async rejectAll(): Promise<void> {
@@ -324,7 +367,7 @@ export class ReviewPanel {
     const review = this.getReviewMap(this.interaction.id);
     markFileAccepted(review, file);
     await this.setReviewMap(this.interaction.id, review);
-    await this.refresh();
+    await this.rerender();
   }
 
   private async acceptHunk(
@@ -341,7 +384,7 @@ export class ReviewPanel {
     const review = this.getReviewMap(this.interaction.id);
     markHunkAccepted(review, fileKey(repoRoot, filePath), hunkHash);
     await this.setReviewMap(this.interaction.id, review);
-    await this.refresh();
+    await this.rerender();
   }
 
   private async rejectFileByPath(repoRoot: string, filePath: string): Promise<void> {
@@ -820,23 +863,30 @@ export class ReviewPanel {
     let hunkEls = [];
     let selected = -1;
 
-    function applySelection() {
+    function applySelection(scroll) {
       hunkEls.forEach((e, i) => e.classList.toggle('selected', i === selected));
-      if (selected >= 0 && hunkEls[selected]) {
+      if (scroll && selected >= 0 && hunkEls[selected]) {
         hunkEls[selected].scrollIntoView({ block: 'nearest' });
       }
     }
 
-    function rebuildSelection() {
+    // Keep the reviewer where they were. Re-rendering replaces every node, so
+    // without this each accept/reject would throw them back to the first hunk.
+    function rebuildSelection(preferHash, fallbackIndex) {
       hunkEls = Array.from(document.querySelectorAll('.hunk[data-actionable="1"]'));
-      selected = hunkEls.length ? 0 : -1;
-      applySelection();
+      if (!hunkEls.length) { selected = -1; applySelection(false); return; }
+      let idx = preferHash ? hunkEls.findIndex((e) => e.dataset.hash === preferHash) : -1;
+      // The selected hunk is gone (just resolved), so the one that took its
+      // place is the next thing to review.
+      if (idx < 0) idx = Math.min(Math.max(fallbackIndex, 0), hunkEls.length - 1);
+      selected = idx;
+      applySelection(false);
     }
 
     function move(delta) {
       if (!hunkEls.length) return;
       selected = Math.max(0, Math.min(hunkEls.length - 1, (selected < 0 ? 0 : selected + delta)));
-      applySelection();
+      applySelection(true);
     }
 
     function actOnSelected(type) {
@@ -862,6 +912,9 @@ export class ReviewPanel {
 
     window.addEventListener('message', (event) => {
       const msg = event.data;
+      const keepHash = selected >= 0 && hunkEls[selected] ? hunkEls[selected].dataset.hash : null;
+      const keepIndex = selected;
+      const keepScroll = window.scrollY;
       content.innerHTML = '';
       if (msg.type === 'render') {
         countEl.textContent = '(' + msg.files.length + ')';
@@ -877,7 +930,8 @@ export class ReviewPanel {
         } else {
           for (const file of msg.files) content.appendChild(renderFile(file));
         }
-        rebuildSelection();
+        window.scrollTo(0, keepScroll);
+        rebuildSelection(keepHash, keepIndex);
       } else if (msg.type === 'empty') {
         countEl.textContent = '';
         const box = el('div', 'empty');
@@ -890,11 +944,11 @@ export class ReviewPanel {
           box.appendChild(btn);
         }
         content.appendChild(box);
-        rebuildSelection();
+        rebuildSelection(null, -1);
       } else if (msg.type === 'error') {
         countEl.textContent = '';
         content.appendChild(el('div', 'error', msg.message));
-        rebuildSelection();
+        rebuildSelection(null, -1);
       }
     });
 

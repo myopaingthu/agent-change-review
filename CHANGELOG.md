@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0
+
+**Node.js is no longer required.** Existing installs are migrated automatically on the next window reload; restart your Claude Code session afterwards to pick it up.
+
+- **The hook no longer spawns anything.** It was registered as `node "~/.claude/acr/hook.js" …`, so on a machine without `node` on its `PATH` it failed on every single event — Claude Code showed a recurring hook error, nothing was ever recorded, and the panel stayed empty forever with no indication why. The four events are now `http` hooks that Claude Code posts directly to the extension, which does the recording itself. Nothing has to be installed for it to work.
+- **Requires a Claude Code with HTTP hook support** (January 2026 or later).
+- **VS Code must be running while the agent works.** The extension is what records now, so a request made with the editor closed isn't captured. Previously the spawned hook recorded regardless.
+- The receiver listens on `127.0.0.1` only, behind a random per-machine token, and accepts only local `POST`s that carry it — it is not reachable from your network. One port is shared across all VS Code windows.
+- **Fixed: rejecting a hunk failed after you edited nearby lines yourself.** `git diff` often emits one hunk covering several separate changes, which is split into individually reviewable pieces — but the last piece inherited all of the original hunk's trailing context, so typing a line just after the agent's change made that context stop matching and the reject was refused with `patch does not apply`. Undoing is retried with reduced context, which places the hunk from one matching line either side. A genuine overlap with the agent's own lines is still reported as a conflict rather than force-applied.
+- **Accept is now instant.** Accepting only resolves a hunk in the review state — nothing on disk moves — yet it was re-running the whole diff: a working-tree snapshot plus four `git diff`s. It now re-renders from what's already loaded and touches git not at all.
+- **Working-tree snapshots are about 3x faster** (~90ms to ~33ms on a 693-file repo), by seeding the throwaway index from the real one so git's stat cache carries over instead of re-hashing the whole tree.
+- **Accepting or rejecting no longer scrolls you back to the top.** The panel keeps your position and selection across a re-render, and after resolving a hunk it selects whatever took its place.
+- Refreshes are coalesced, so rejecting no longer triggers a second full pass when the file watcher notices the write.
+- Checkpoints now advance `refs/acr/head` as a compare-and-swap, so two agent sessions checkpointing the same repo at once can no longer silently drop one another's snapshot.
+- **Uninstall Claude Code Hook** now clears entries from both the project and global settings files, so switching `hookScope` can't strand a half-install.
+
 ## 0.3.0
 
 Breaking rework of how changes are detected. **Re-run "Install Claude Code Hook" and restart your Claude Code session** — the hook now registers a new `PreToolUse` event.

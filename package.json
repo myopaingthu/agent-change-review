@@ -2,7 +2,7 @@
   "name": "agent-change-review",
   "displayName": "Agent Change Review",
   "description": "Review AI agent code changes with accept/reject actions by file or hunk.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "myopaingthu",
   "license": "MIT",
   "engines": {

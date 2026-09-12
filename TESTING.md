@@ -118,10 +118,10 @@ After changing anything in `src/**`:
 1. The `npm: watch` task recompiles (or F5 recompiles on relaunch).
 2. In the **[Extension Development Host]** window, run **Developer: Reload Window** (`Cmd+R`).
 
-> If you changed `src/hookRunner.ts`, the new build is copied to
-> `~/.claude/acr/hook.js` on activation — but Claude Code only re-reads hook
-> *config* at session start. Restart the Claude session after changing which
-> events are registered.
+> If you changed `src/hookServer.ts`, reloading the dev host restarts the
+> receiver — but Claude Code only re-reads hook *config* at session start.
+> Restart the Claude session after changing which events are registered or the
+> URL they point at.
 
 ## 9. Stop
 
@@ -134,15 +134,21 @@ Close the dev-host window, or press **stop** on the debug toolbar.
 - **"No agent changes recorded yet" after a request** → the hook isn't running.
   Check, in order:
   1. Did you restart the Claude Code session after installing?
-  2. Is `node` on your `PATH`? (the hook command is `node "~/.claude/acr/hook.js" …`)
-  3. Does `~/acr-test/backend/.git/acr/timeline.jsonl` exist and grow after a request?
-  4. Does `~/acr-test/.claude/settings.local.json` contain four ACR hook entries
-     (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`)?
+  2. Is the receiver listening? `lsof -nP -iTCP:51797 -sTCP:LISTEN` should show a
+     VS Code process. Probe it with the URL from your settings file:
+     `curl -s "<url-without-the-event>/health"` → `{"agentChangeReview":true}`.
+  3. Is your Claude Code new enough for `http` hooks (January 2026 or later)?
+     An older build ignores them silently.
+  4. Does `~/acr-test/backend/.git/acr/timeline.jsonl` exist and grow after a request?
+  5. Does `~/acr-test/.claude/settings.local.json` contain four ACR hook entries
+     (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`), each `"type": "http"`?
 - **Command missing from the palette** → the extension failed to activate. Check
   the **Debug Console** in the main window for an activation error.
 - **"This folder isn't a Git repository"** → no repo was found at or below the
   folder. Click **Initialize Git Repository**, or open a folder that contains one.
-- **Reject hunk fails** → the file changed since the diff was captured. Click
-  **Refresh** and try again.
+- **Reject hunk fails** → your own edits overlap the agent's exact lines, so the
+  change can't be undone on its own. (Editing merely *near* the agent's change is
+  tolerated.) Click **Refresh** and try again, or reject the whole file and take
+  the offered restore.
 - **Changes from a shell `rm`/`mv` don't show** → expected; the hook only sees the
   `Edit`/`Write` tools.

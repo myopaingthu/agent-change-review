@@ -5,6 +5,9 @@ import * as path from "path";
 import { ChangedFile, Hunk } from "./types";
 import { buildFilePatch, buildHunkPatch } from "./diffParser";
 
+/** Keeps checkpoint commits reachable so `git gc` cannot prune them. */
+export const CHECKPOINT_REF = "refs/acr/head";
+
 export class GitError extends Error {
   constructor(message: string, public readonly stderr?: string) {
     super(message);
@@ -80,13 +83,77 @@ export async function snapshotTree(repoRoot: string): Promise<string> {
   );
   const env = { ...process.env, GIT_INDEX_FILE: tmpIndex };
   try {
-    // Seed from HEAD when it exists so deletions register; harmless if not.
-    await runGit(repoRoot, ["read-tree", "HEAD"], env).catch(() => undefined);
+    await seedIndex(repoRoot, tmpIndex, env);
     await runGit(repoRoot, ["add", "-A"], env);
     return (await runGit(repoRoot, ["write-tree"], env)).trim();
   } finally {
     await fs.promises.rm(tmpIndex, { force: true });
   }
+}
+
+/**
+ * Give the throwaway index a starting point for `git add -A`.
+ *
+ * Copying the real index carries over git's stat cache, so `add -A` only
+ * re-hashes files whose stat data actually changed rather than walking and
+ * hashing the whole tree — roughly halves the cost on a large repo, which
+ * matters because every refresh takes a snapshot. Falls back to HEAD when there
+ * is no index yet; either way `add -A` converges on the working tree.
+ */
+async function seedIndex(
+  repoRoot: string,
+  tmpIndex: string,
+  env: NodeJS.ProcessEnv
+): Promise<void> {
+  try {
+    // git writes the index atomically via rename, so this can't read a torn file.
+    await fs.promises.copyFile(path.join(await getGitDir(repoRoot), "index"), tmpIndex);
+    return;
+  } catch {
+    // No index yet (fresh repo), or it vanished mid-copy.
+  }
+  await runGit(repoRoot, ["read-tree", "HEAD"], env).catch(() => undefined);
+}
+
+/**
+ * Capture the repo's whole working tree as a checkpoint commit and advance
+ * CHECKPOINT_REF to it. Built on snapshotTree, so the real index and working tree
+ * are untouched, and the commit never joins the user's history or `git status`.
+ *
+ * The ref moves as a compare-and-swap against the parent this commit was built
+ * on, so two checkpoints racing on one repo cannot silently drop each other's
+ * work — the loser fails loudly instead of vanishing from the chain.
+ */
+export async function writeCheckpoint(repoRoot: string): Promise<string> {
+  const tree = await snapshotTree(repoRoot);
+  const parent = await runGit(repoRoot, [
+    "rev-parse",
+    "--verify",
+    "-q",
+    CHECKPOINT_REF,
+  ])
+    .then((out) => out.trim())
+    .catch(() => "");
+
+  const commitArgs = ["commit-tree", tree];
+  if (parent) {
+    commitArgs.push("-p", parent);
+  }
+  commitArgs.push("-m", "acr checkpoint");
+
+  // An identity so commit-tree works even without a configured git user.
+  const identity: NodeJS.ProcessEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "Agent Change Review",
+    GIT_AUTHOR_EMAIL: "acr@local",
+    GIT_COMMITTER_NAME: "Agent Change Review",
+    GIT_COMMITTER_EMAIL: "acr@local",
+  };
+  const commit = (await runGit(repoRoot, commitArgs, identity)).trim();
+
+  // An empty oldvalue asserts the ref does not exist yet.
+  await runGit(repoRoot, ["update-ref", CHECKPOINT_REF, commit, parent]);
+  return commit;
 }
 
 /**
@@ -161,6 +228,15 @@ export async function pathExistsInCommit(
  * Undo a patch in the working tree by reverse-applying it. Only the lines the
  * patch describes are touched, so unrelated edits in the same file survive.
  * Throws PatchConflictError when the patch no longer applies.
+ *
+ * Retries with reduced context before giving up. Splitting one of git's hunks
+ * into several (see splitHunks) gives the last piece all of the original hunk's
+ * trailing context, so an edit of the user's a line or two past the agent's
+ * change lands inside that context and defeats an exact match — even though the
+ * agent's own lines are untouched and the undo is perfectly well defined. One
+ * matching context line either side is enough to place the hunk, and the exact
+ * pass has already been tried, so this only ever rescues a patch that would
+ * otherwise have been refused.
  */
 export async function applyPatchReverse(
   repoRoot: string,
@@ -171,14 +247,13 @@ export async function applyPatchReverse(
     `acr-patch-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.patch`
   );
   await fs.promises.writeFile(tmp, patchText, "utf8");
+  const base = ["apply", "--reverse", "--recount", "--whitespace=nowarn"];
   try {
-    await runGit(repoRoot, [
-      "apply",
-      "--reverse",
-      "--recount",
-      "--whitespace=nowarn",
-      tmp,
-    ]);
+    try {
+      await runGit(repoRoot, [...base, tmp]);
+    } catch {
+      await runGit(repoRoot, [...base, "-C1", tmp]);
+    }
   } catch (err) {
     throw new PatchConflictError(err instanceof GitError ? err.stderr : undefined);
   } finally {

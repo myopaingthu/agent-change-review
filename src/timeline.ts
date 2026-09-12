@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { applySectionHeadings, parseDiff } from "./diffParser";
 import {
+  CHECKPOINT_REF,
   changedPaths,
   diffCommits,
   getGitDir,
@@ -19,9 +20,8 @@ import {
   RepoFile,
 } from "./types";
 
-const CHECKPOINT_REF = "refs/acr/head";
-
-async function getAcrDir(repoRoot: string): Promise<string> {
+/** Where a repo's recorded interactions live, inside its git dir. */
+export async function getAcrDir(repoRoot: string): Promise<string> {
   return path.join(await getGitDir(repoRoot), "acr");
 }
 

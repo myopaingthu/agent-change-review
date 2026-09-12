@@ -1,15 +1,25 @@
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as vscode from "vscode";
-import { installHook, syncHookRunner, uninstallHook } from "./hookInstall";
+import { installHook, syncHookConfig, uninstallHook } from "./hookInstall";
+import { HookServer } from "./hookServer";
 import { discoverRepos, invalidateRepoCache } from "./repoResolver";
 import { hasPendingReview, ReviewPanel } from "./reviewPanel";
 import { getTimelinePath } from "./timeline";
 
+const HOOK_TOKEN_KEY = "agentChangeReview.hookToken";
+
 export function activate(context: vscode.ExtensionContext): void {
   const ensurePanel = () => ReviewPanel.current ?? ReviewPanel.createOrShow(context);
 
-  // Keep the globally-installed hook runner in sync with this build.
-  syncHookRunner(context);
+  // Bring up the receiver Claude Code posts to, then repair any existing install
+  // whose address has gone stale.
+  const hookServer = new HookServer();
+  context.subscriptions.push(hookServer);
+  const serverReady = hookServer
+    .start(getHookToken(context))
+    .then(() => syncHookConfig(hookServer.baseUrl))
+    .catch(() => undefined);
 
   context.subscriptions.push(
     vscode.commands.registerCommand("agentChangeReview.open", () => {
@@ -28,8 +38,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("agentChangeReview.newSession", () => {
       void ensurePanel().newSession();
     }),
-    vscode.commands.registerCommand("agentChangeReview.installHook", () => {
-      void installHook(context);
+    vscode.commands.registerCommand("agentChangeReview.installHook", async () => {
+      await serverReady;
+      await installHook(hookServer.baseUrl);
     }),
     vscode.commands.registerCommand("agentChangeReview.uninstallHook", () => {
       void uninstallHook();
@@ -142,6 +153,21 @@ async function syncAutoOpenWatchers(context: vscode.ExtensionContext): Promise<v
     fs.watchFile(timelinePath, { interval: 1000 }, listener);
     autoOpenWatchers.set(timelinePath, listener);
   }
+}
+
+/**
+ * The secret in the receiver's URL, so only Claude Code — which reads it from
+ * the settings file we wrote — can post events. Stored in globalState, which is
+ * shared across windows, so every window agrees on one address.
+ */
+function getHookToken(context: vscode.ExtensionContext): string {
+  const existing = context.globalState.get<string>(HOOK_TOKEN_KEY);
+  if (existing) {
+    return existing;
+  }
+  const token = crypto.randomBytes(16).toString("hex");
+  void context.globalState.update(HOOK_TOKEN_KEY, token);
+  return token;
 }
 
 function debounce<T extends (arg: vscode.Uri) => void>(fn: T, ms: number): T {
